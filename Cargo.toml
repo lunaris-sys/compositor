@@ -10,6 +10,8 @@ rust-version = "1.90"
 members = ["cosmic-comp-config"]
 
 [dependencies]
+prost = "0.13"
+uuid = { version = "1", features = ["v7"] }
 anyhow = { version = "1.0.102", features = ["backtrace"] }
 bitflags = "2.11.0"
 calloop = { version = "0.14.4", features = ["executor"] }
@@ -143,3 +145,6 @@ cosmic-client-toolkit = { git = "https://github.com/pop-os//cosmic-protocols", b
 
 [patch.crates-io]
 smithay = { git = "https://github.com/smithay/smithay.git", rev = "e84a4ca" }
+
+[build-dependencies]
+prost-build = "0.13"

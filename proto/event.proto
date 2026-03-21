@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package lunaris.eventbus;
+
+// Common envelope for all events on the bus.
+// The type-specific payload is encoded as a protobuf message
+// inside the payload field.
+message Event {
+  string id         = 1;  // UUID v7 (time-sortable, see RFC 9562)
+  string type       = 2;  // "file.opened", "window.focused", "app.action", etc.
+  int64  timestamp  = 3;  // microseconds since Unix epoch
+  string source     = 4;  // "ebpf", "wayland", "app:<app-id>", "journald"
+  uint32 pid        = 5;  // originating process ID
+  string session_id = 6;  // user session reference
+  bytes  payload    = 7;  // type-specific protobuf message, encoded
+}
+
+// Emitted when a file is opened by any process.
+message FileOpenedPayload {
+  string path      = 1;  // absolute path
+  string app_id    = 2;  // application identifier
+  uint32 flags     = 3;  // openat() flags (O_RDONLY, O_WRONLY, etc.)
+}
+
+// Emitted when keyboard focus changes between Wayland surfaces.
+message WindowFocusedPayload {
+  string app_id      = 1;
+  string window_title = 2;
+  string prev_app_id  = 3;  // previously focused app, empty if none
+}
+
+// Emitted when a clipboard operation occurs.
+// Content is never included.
+message ClipboardOperationPayload {
+  string source_app_id = 1;
+  string dest_app_id   = 2;  // empty for copy, set for paste
+  string mime_type     = 3;
+  string operation     = 4;  // "copy" or "paste"
+}
+
+// Generic payload for first-party app events.
+// Apps emit structured semantic actions without requiring
+// a dedicated payload type per application.
+message AppActionPayload {
+  string category = 1;  // e.g. "document", "search", "navigation"
+  string action   = 2;  // e.g. "saved", "performed", "opened"
+  string subject  = 3;  // e.g. file path, query string, URL
+  map<string, string> metadata = 4;
+}
+
+// Emitted when a process starts or exits.
+message ProcessLifecyclePayload {
+  string event_type = 1;  // "started" or "exited"
+  uint32 pid        = 2;
+  uint32 ppid       = 3;  // parent PID
+  string comm       = 4;  // process name (comm field)
+  int32  exit_code  = 5;  // only set for "exited"
+}
+
+// Emitted when a network connection is established.
+message NetworkConnectionPayload {
+  string app_id      = 1;
+  string remote_addr = 2;  // IP:port
+  string protocol    = 3;  // "tcp" or "udp"
+  string direction   = 4;  // "outbound" or "inbound"
+}

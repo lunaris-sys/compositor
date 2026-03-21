@@ -206,6 +206,14 @@ impl Shell {
             state.common.shell.write().append_focus_stack(target, seat);
         }
 
+        // Emit window.focused event to the Lunaris Event Bus.
+        {
+            let app_id = match target {
+                Some(KeyboardFocusTarget::Element(mapped)) => mapped.active_window().app_id(),
+                _ => String::from("unknown"),
+            };
+            state.common.event_bus.emit_window_focused(&app_id);
+        }
         update_focus_state(seat, target, state, serial, update_cursor);
 
         state.common.shell.write().update_active();

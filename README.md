@@ -58,4 +58,4 @@ Integration tests require a running X11/Wayland session and are located in `dist
 
 ## Part of
 
-[Lunaris](https://github.com/lunaris-sys) — a Linux desktop OS built around a system-wide knowledge graph.
+[Lunaris](https://github.com/lunaris-sys): a Linux desktop OS built around a system-wide knowledge graph.

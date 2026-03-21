@@ -311,6 +311,8 @@ impl XdgShellHandler for State {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let app_id = CosmicSurface::from(surface.clone()).app_id();
+        self.common.event_bus.emit_window_closed(&app_id);
         let (output, clients) = {
             let mut shell = self.common.shell.write();
             let seat = shell.seats.last_active().clone();

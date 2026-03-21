@@ -847,7 +847,9 @@ impl XwmHandler for State {
             );
             if let Some(target) = res {
                 let seat = shell.seats.last_active().clone();
+                let app_id = window.app_id();
                 std::mem::drop(shell);
+                self.common.event_bus.emit_window_opened(&app_id);
                 Shell::set_focus(self, Some(&target), &seat, None, false);
             }
         }

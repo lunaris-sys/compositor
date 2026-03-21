@@ -18,6 +18,15 @@ impl SelectionHandler for State {
         source: Option<SelectionSource>,
         _seat: Seat<State>,
     ) {
+        // Emit clipboard event to Event Bus.
+        // Content is never included; only the MIME type and operation metadata.
+        if matches!(target, SelectionTarget::Clipboard) {
+            let mime_type = source
+                .as_ref()
+                .and_then(|s| s.mime_types().into_iter().next())
+                .unwrap_or_default();
+            self.common.event_bus.emit_clipboard_copy(&mime_type);
+        }
         let Some(xwm_id) = self
             .common
             .xwayland_state

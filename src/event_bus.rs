@@ -72,7 +72,29 @@ impl EventBusHandle {
         }
     }
 
-    /// Emit a `window.closed` event with the given app ID.
+    /// Emit a `clipboard.copy` event with the given MIME type.
+    ///
+    /// The clipboard content is never included, only the MIME type.
+    pub fn emit_clipboard_copy(&self, mime_type: &str) {
+        let event = Event {
+            id: uuid::Uuid::now_v7().to_string(),
+            r#type: "clipboard.copy".to_string(),
+            timestamp: timestamp_micros(),
+            source: "wayland".to_string(),
+            pid: std::process::id(),
+            session_id: self.session_id.clone(),
+            payload: vec![],
+        };
+        if let Some(msg) = encode(event) {
+            self.try_send(msg);
+            tracing::debug!(mime_type, "emitted clipboard.copy event");
+        }
+    }
+
+    /// Emit a `clipboard.copy` event with the given MIME type.
+    ///
+    /// The clipboard content is never included, only the MIME type.
+    
     pub fn emit_window_closed(&self, app_id: &str) {
         let event = Event {
             id: uuid::Uuid::now_v7().to_string(),

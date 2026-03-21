@@ -10,6 +10,9 @@ rust-version = "1.90"
 members = ["cosmic-comp-config"]
 
 [dependencies]
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", features = ["client"], optional = true }
+tempfile = { version = "3", optional = true }
 prost = "0.13"
 uuid = { version = "1", features = ["v7"] }
 anyhow = { version = "1.0.102", features = ["backtrace"] }
@@ -120,6 +123,7 @@ optional = true
 debug = ["egui", "egui_plot", "smithay-egui", "anyhow/backtrace"]
 default = ["systemd"]
 systemd = ["libsystemd", "logind-zbus"]
+test-client = ["dep:wayland-client", "dep:wayland-protocols", "dep:tempfile"]
 profile-with-tracy = ["profiling/profile-with-tracy", "tracy-client/default"]
 profile-with-tracy-gpu = ["profile-with-tracy", "smithay/tracy_gpu_profiling"]
 

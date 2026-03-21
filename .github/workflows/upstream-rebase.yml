@@ -1,0 +1,123 @@
+name: Upstream Rebase
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/pop-os/cosmic-comp
+          git fetch upstream master
+
+      - name: Attempt rebase
+        id: rebase
+        run: |
+          BRANCH="upstream-rebase-$(date +%Y-%m-%d)"
+          UPSTREAM_HASH=$(git rev-parse upstream/master)
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "upstream_hash=$UPSTREAM_HASH" >> $GITHUB_OUTPUT
+
+          git checkout -b "$BRANCH"
+
+          if git rebase upstream/master; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            # Collect conflicting files
+            CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            echo "status=conflict" >> $GITHUB_OUTPUT
+            echo "conflicts=$CONFLICTS" >> $GITHUB_OUTPUT
+            git rebase --abort
+          fi
+
+      - name: Push branch and open PR (on success)
+        if: steps.rebase.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.rebase.outputs.branch }}"
+          UPSTREAM_HASH="${{ steps.rebase.outputs.upstream_hash }}"
+
+          git push origin "$BRANCH"
+
+          # Close any previously open rebase PRs to avoid accumulation
+          gh pr list --label "upstream-rebase" --state open --json number \
+            --jq '.[].number' | while read pr; do
+            gh pr close "$pr" --comment "Superseded by newer rebase PR."
+          done
+
+          gh pr create \
+            --title "Upstream rebase $(date +%Y-%m-%d)" \
+            --body "Automated weekly rebase onto \`upstream/master\` at \`${UPSTREAM_HASH}\`.
+
+          **Review checklist:**
+          - [ ] Event Bus calls still present in \`src/shell/focus/mod.rs\`
+          - [ ] Event Bus calls still present in \`src/wayland/handlers/compositor.rs\`
+          - [ ] Event Bus calls still present in \`src/wayland/handlers/xdg_shell/mod.rs\`
+          - [ ] Event Bus calls still present in \`src/xwayland.rs\`
+          - [ ] Event Bus calls still present in \`src/wayland/handlers/selection.rs\`
+          - [ ] \`src/event_bus.rs\` is unchanged
+          - [ ] \`cargo build\` passes
+
+          See [PORTING.md](../blob/master/PORTING.md) for conflict resolution guidelines." \
+            --label "upstream-rebase" \
+            --head "$BRANCH" \
+            --base "master"
+
+      - name: Open conflict issue (on failure)
+        if: steps.rebase.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_HASH="${{ steps.rebase.outputs.upstream_hash }}"
+          CONFLICTS="${{ steps.rebase.outputs.conflicts }}"
+
+          # Close any previously open conflict issues
+          gh issue list --label "upstream-rebase-conflict" --state open --json number \
+            --jq '.[].number' | while read issue; do
+            gh issue close "$issue" --comment "Superseded by newer conflict report."
+          done
+
+          gh issue create \
+            --title "Upstream rebase conflict $(date +%Y-%m-%d)" \
+            --body "Automated weekly rebase onto \`upstream/master\` at \`${UPSTREAM_HASH}\` failed with conflicts.
+
+          **Conflicting files:**
+          \`\`\`
+          ${CONFLICTS}
+          \`\`\`
+
+          **To resolve manually:**
+          \`\`\`bash
+          git fetch upstream
+          git checkout -b upstream-rebase-$(date +%Y-%m-%d)
+          git rebase upstream/master
+          # resolve conflicts
+          git rebase --continue
+          git push origin upstream-rebase-$(date +%Y-%m-%d)
+          # open PR manually
+          \`\`\`
+
+          See [PORTING.md](../blob/master/PORTING.md) for conflict resolution guidelines." \
+            --label "upstream-rebase-conflict"

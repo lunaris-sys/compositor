@@ -59,6 +59,13 @@ jobs:
           BRANCH="${{ steps.rebase.outputs.branch }}"
           UPSTREAM_HASH="${{ steps.rebase.outputs.upstream_hash }}"
 
+          # Check if there are new commits vs master
+          COMMITS=$(git log master..HEAD --oneline | wc -l)
+          if [ "$COMMITS" -eq 0 ]; then
+            echo "No new commits from upstream, skipping PR."
+            exit 0
+          fi
+
           git push origin "$BRANCH"
 
           # Close any previously open rebase PRs to avoid accumulation

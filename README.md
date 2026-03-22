@@ -8,13 +8,13 @@ This repo is not a GitHub fork. It is a standalone repo with cosmic-comp tracked
 
 All changes are documented in [PORTING.md](PORTING.md). The short version:
 
-- **`src/event_bus.rs`** — new file. Background thread that connects to the Lunaris Event Bus and emits events. Non-blocking: if the Event Bus is not running, events are dropped silently.
-- **`src/state.rs`** — `EventBusHandle` added to `Common`
-- **`src/shell/focus/mod.rs`** — emits `window.focused`
-- **`src/wayland/handlers/compositor.rs`** — emits `window.opened` after map
-- **`src/xwayland.rs`** — emits `window.opened` for XWayland windows
-- **`src/wayland/handlers/xdg_shell/mod.rs`** — emits `window.closed` on destroy
-- **`src/wayland/handlers/selection.rs`** — emits `clipboard.copy` on clipboard write
+- **`src/event_bus.rs`**: new file. Background thread that connects to the Lunaris Event Bus and emits events. Non-blocking: if the Event Bus is not running, events are dropped silently.
+- **`src/state.rs`**: `EventBusHandle` added to `Common`
+- **`src/shell/focus/mod.rs`**: emits `window.focused`
+- **`src/wayland/handlers/compositor.rs`**: emits `window.opened` after map
+- **`src/xwayland.rs`**: emits `window.opened` for XWayland windows
+- **`src/wayland/handlers/xdg_shell/mod.rs`**: emits `window.closed` on destroy
+- **`src/wayland/handlers/selection.rs`**: emits `clipboard.copy` on clipboard write
 
 ## Events emitted
 

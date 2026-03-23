@@ -66,7 +66,7 @@ impl XdgDecorationHandler for State {
         let shell = self.common.shell.read();
         if let Some(mapped) = shell.element_for_surface(toplevel.wl_surface()) {
             let mode = if mapped.is_stack() {
-                XdgMode::ServerSide
+                XdgMode::ClientSide
             } else {
                 XdgMode::ClientSide
             };
@@ -128,7 +128,7 @@ impl KdeDecorationHandler for State {
     fn new_decoration(&mut self, surface: &WlSurface, decoration: &OrgKdeKwinServerDecoration) {
         let mode = if let Some(mapped) = self.common.shell.read().element_for_surface(surface) {
             if mapped.is_stack() {
-                KdeMode::Server
+                KdeMode::Client
             } else {
                 KdeMode::Client
             }

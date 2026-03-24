@@ -22,7 +22,7 @@ use crate::{
             output_configuration::OutputConfigurationState,
             output_power::OutputPowerState,
             overlap_notify::OverlapNotifyState,
-            shell_overlay::{ShellOverlayHandler, ShellOverlayState, WindowAction},
+            shell_overlay::{ShellOverlayHandler, ShellOverlayState},
             toplevel_info::ToplevelInfoState,
             toplevel_management::{ManagementCapabilities, ToplevelManagementState},
             workspace::{WorkspaceState, WorkspaceUpdateGuard},

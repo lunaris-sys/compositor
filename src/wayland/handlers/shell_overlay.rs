@@ -2,14 +2,14 @@
 
 //! Handler implementation for the `lunaris-shell-overlay-v1` protocol.
 
-use calloop::LoopHandle;
+use smithay::utils::SERIAL_COUNTER;
 
 use crate::{
     delegate_shell_overlay,
-    shell::grabs::menu::Item,
+    shell::grabs::menu::{Item, SeatMenuGrabState},
     state::State,
     wayland::protocols::shell_overlay::{
-        ContextMenuItem, ShellOverlayHandler, ShellOverlayState, WindowAction,
+        ShellOverlayHandler, ShellOverlayState,
     },
 };
 
@@ -43,10 +43,44 @@ impl ShellOverlayHandler for State {
                 menu_id
             );
         }
+
+        unset_overlay_grab(self, menu_id);
     }
 
     fn context_menu_dismiss(&mut self, menu_id: u32) {
         self.common.pending_menu_callbacks.remove(&menu_id);
+        unset_overlay_grab(self, menu_id);
+    }
+}
+
+/// Release the pointer grab held by the `MenuGrab` that owns `menu_id`.
+///
+/// Iterates all seats, finds the one whose `SeatMenuGrabState` carries the
+/// matching `menu_id`, and calls `unset_grab` on its pointer.
+fn unset_overlay_grab(state: &mut State, menu_id: u32) {
+    let matching_seat = {
+        let shell = state.common.shell.read();
+        shell
+            .seats
+            .iter()
+            .find(|seat| {
+                seat.user_data()
+                    .get::<SeatMenuGrabState>()
+                    .and_then(|g| {
+                        g.lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|s| s.menu_id)
+                    })
+                    == Some(menu_id)
+            })
+            .cloned()
+    };
+
+    if let Some(seat) = matching_seat {
+        if let Some(ptr) = seat.get_pointer() {
+            ptr.unset_grab(state, SERIAL_COUNTER.next_serial(), 0);
+        }
     }
 }
 

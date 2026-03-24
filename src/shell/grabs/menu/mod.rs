@@ -49,6 +49,7 @@ use crate::{
         iced::{IcedElement, Program},
         prelude::*,
     },
+    wayland::protocols::shell_overlay::WindowAction,
 };
 
 use super::{GrabStartData, ResizeEdge};
@@ -61,6 +62,10 @@ pub struct MenuGrabState {
     elements: Arc<Mutex<Vec<Element>>>,
     screen_space_relative: Option<Output>,
     scale: Arc<Mutex<f64>>,
+    /// Set when the overlay protocol is active for this grab.
+    /// When `Some`, rendering is delegated to desktop-shell and `render()`
+    /// returns an empty list.
+    pub menu_id: Option<u32>,
 }
 pub type SeatMenuGrabState = Mutex<Option<MenuGrabState>>;
 
@@ -71,6 +76,10 @@ impl MenuGrabState {
         R::TextureId: Send + Clone + 'static,
         I: From<MemoryRenderBufferRenderElement<R>>,
     {
+        // Overlay path: desktop-shell renders the menu; nothing to composite here.
+        if self.menu_id.is_some() {
+            return Vec::new();
+        }
         let scale = output.current_scale().fractional_scale();
         self.elements
             .lock()
@@ -95,6 +104,9 @@ impl MenuGrabState {
     }
 
     pub fn set_theme(&self, theme: cosmic::Theme) {
+        if self.menu_id.is_some() {
+            return;
+        }
         for element in &*self.elements.lock().unwrap() {
             element.iced.set_theme(theme.clone())
         }
@@ -115,6 +127,9 @@ pub enum Item {
         toggled: bool,
         submenu: bool,
         disabled: bool,
+        /// The window management action this entry maps to in the overlay protocol.
+        /// `None` for items that are not sent over the protocol (e.g. zoom menu entries).
+        action: Option<WindowAction>,
     },
 }
 
@@ -134,6 +149,7 @@ impl fmt::Debug for Item {
                 toggled,
                 submenu,
                 disabled,
+                action,
             } => f
                 .debug_struct("Entry")
                 .field("title", title)
@@ -142,6 +158,7 @@ impl fmt::Debug for Item {
                 .field("toggled", toggled)
                 .field("submenu", submenu)
                 .field("disabled", disabled)
+                .field("action", action)
                 .finish(),
         }
     }
@@ -159,7 +176,19 @@ impl Item {
             toggled: false,
             submenu: false,
             disabled: false,
+            action: None,
         }
+    }
+
+    /// Set the `WindowAction` this entry maps to in the overlay protocol.
+    pub fn action(mut self, action: WindowAction) -> Self {
+        if let Item::Entry {
+            action: ref mut a, ..
+        } = self
+        {
+            *a = Some(action);
+        }
+        self
     }
 
     pub fn new_submenu<S: Into<String>>(title: S, items: Vec<Item>) -> Item {
@@ -506,6 +535,10 @@ pub struct MenuGrab {
     seat: Seat<State>,
     screen_space_relative: Option<Output>,
     scale: Arc<Mutex<f64>>,
+    /// Set when the overlay protocol is active. `None` means Iced path.
+    menu_id: Option<u32>,
+    /// Desktop-shell surface focus target for pointer event routing in overlay path.
+    shell_focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
 }
 
 impl PointerGrab<State> for MenuGrab {
@@ -516,6 +549,12 @@ impl PointerGrab<State> for MenuGrab {
         _focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
         event: &PointerMotionEvent,
     ) {
+        if self.menu_id.is_some() {
+            // Overlay path: give desktop-shell pointer focus so it receives events.
+            handle.motion(state, self.shell_focus.clone(), event);
+            return;
+        }
+
         {
             let mut guard = self.elements.lock().unwrap();
             let elements = &mut *guard;
@@ -588,6 +627,13 @@ impl PointerGrab<State> for MenuGrab {
         handle: &mut PointerInnerHandle<'_, State>,
         event: &ButtonEvent,
     ) {
+        if self.menu_id.is_some() {
+            // Overlay path: forward button events to desktop-shell.
+            // The grab is released when desktop-shell sends activate or dismiss.
+            handle.button(state, event);
+            return;
+        }
+
         let any_entered = self
             .elements
             .lock()
@@ -999,6 +1045,15 @@ impl MenuAlignment {
 }
 
 impl MenuGrab {
+    /// Create a new `MenuGrab`.
+    ///
+    /// When `menu_id` is `Some`, the overlay protocol path is active: Iced is
+    /// not used and rendering is delegated to desktop-shell. Pointer events are
+    /// forwarded to `shell_focus` so that the desktop-shell client can detect
+    /// clicks on the rendered menu.
+    ///
+    /// When `menu_id` is `None`, the grab falls back to Iced rendering (used for
+    /// zoom menus and when no shell client is connected).
     pub fn new(
         start_data: GrabStartData,
         seat: &Seat<State>,
@@ -1008,16 +1063,49 @@ impl MenuGrab {
         screen_space_relative: Option<f64>,
         handle: LoopHandle<'static, crate::state::State>,
         theme: cosmic::Theme,
+        menu_id: Option<u32>,
+        shell_focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
     ) -> MenuGrab {
         let items = items.collect::<Vec<_>>();
-        let element = IcedElement::new(ContextMenu::new(items), Size::default(), handle, theme);
+        let output = seat.active_output();
+        let scale_val = Arc::new(Mutex::new(screen_space_relative.unwrap_or(1.)));
+        let screen_space_output = screen_space_relative.is_some().then_some(output.clone());
+
+        if let Some(id) = menu_id {
+            // Overlay path: desktop-shell renders the menu, no IcedElement needed.
+            let elements = Arc::new(Mutex::new(Vec::<Element>::new()));
+            let grab_state = MenuGrabState {
+                elements: elements.clone(),
+                screen_space_relative: screen_space_output.clone(),
+                scale: scale_val.clone(),
+                menu_id: Some(id),
+            };
+            *seat
+                .user_data()
+                .get::<SeatMenuGrabState>()
+                .unwrap()
+                .lock()
+                .unwrap() = Some(grab_state);
+
+            return MenuGrab {
+                elements,
+                start_data,
+                seat: seat.clone(),
+                screen_space_relative: screen_space_output,
+                scale: scale_val,
+                menu_id: Some(id),
+                shell_focus,
+            };
+        }
+
+        // Iced path: render the menu in-compositor.
+        let element = IcedElement::new(ContextMenu::new(items), Size::default(), handle.clone(), theme);
         let min_size = element.minimum_size();
         element.with_program(|p| {
             *p.row_width.lock().unwrap() = Some(min_size.w as f32);
         });
         element.resize(min_size);
 
-        let output = seat.active_output();
         // TODO: This feels a lot like cheap xdg-positioner. Refactor and unify
         let position = alignment
             .rectangles(
@@ -1051,13 +1139,11 @@ impl MenuGrab {
             touch_entered: None,
         }]));
 
-        let scale = Arc::new(Mutex::new(screen_space_relative.unwrap_or(1.)));
-        let screen_space_relative = screen_space_relative.is_some().then_some(output);
-
         let grab_state = MenuGrabState {
             elements: elements.clone(),
-            screen_space_relative: screen_space_relative.clone(),
-            scale: scale.clone(),
+            screen_space_relative: screen_space_output.clone(),
+            scale: scale_val.clone(),
+            menu_id: None,
         };
 
         *seat
@@ -1071,15 +1157,19 @@ impl MenuGrab {
             elements,
             start_data,
             seat: seat.clone(),
-            screen_space_relative,
-            scale,
+            screen_space_relative: screen_space_output,
+            scale: scale_val,
+            menu_id: None,
+            shell_focus: None,
         }
     }
 
     pub fn set_additional_scale(&self, scale: f64) {
         *self.scale.lock().unwrap() = scale;
-        for element in &*self.elements.lock().unwrap() {
-            element.iced.set_additional_scale(scale);
+        if self.menu_id.is_none() {
+            for element in &*self.elements.lock().unwrap() {
+                element.iced.set_additional_scale(scale);
+            }
         }
     }
 
@@ -1100,5 +1190,9 @@ impl Drop for MenuGrab {
             .lock()
             .unwrap()
             .take();
+        // NOTE: `context_menu_closed` (compositor-initiated close) is not sent
+        // from Drop because `LoopHandle` is not `Send` and cannot be stored here.
+        // Explicit compositor-side teardown (e.g. window destroyed while menu is
+        // open) must call `ShellOverlayState::close_context_menu` at the call site.
     }
 }

@@ -701,6 +701,8 @@ impl Program for ZoomProgram {
                                     Some(level.min(4.)),
                                     state.common.event_loop_handle.clone(),
                                     state.common.theme.clone(),
+                                    None,
+                                    None,
                                 );
 
                                 std::mem::drop(shell);
@@ -786,6 +788,8 @@ impl Program for ZoomProgram {
                                     Some(level.min(4.)),
                                     state.common.event_loop_handle.clone(),
                                     state.common.theme.clone(),
+                                    None,
+                                    None,
                                 );
 
                                 std::mem::drop(shell);

@@ -373,6 +373,8 @@ impl XdgShellHandler for State {
             false,
             &self.common.config,
             &self.common.event_loop_handle,
+            &mut self.common.shell_overlay_state,
+            &mut self.common.pending_menu_callbacks,
         );
         if let Some((grab, focus)) = res {
             std::mem::drop(shell);

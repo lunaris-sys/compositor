@@ -88,6 +88,14 @@ impl ShellOverlayState {
         self.global.clone()
     }
 
+    /// Returns the first connected shell overlay instance, if any.
+    ///
+    /// Used by the compositor to identify the desktop-shell client for
+    /// pointer focus routing during context menu grabs.
+    pub fn overlay_instance(&self) -> Option<&LunarisShellOverlayV1> {
+        self.instances.first()
+    }
+
     /// Send a context menu sequence to all connected shell clients.
     ///
     /// Sends `context_menu_begin`, one event per item, then `context_menu_done`.

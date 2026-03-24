@@ -71,6 +71,7 @@ use crate::{
             xdg_shell::popup::get_popup_toplevel,
         },
         protocols::{
+            shell_overlay::{ContextMenuItem, ShellOverlayState},
             toplevel_info::{
                 ToplevelInfoState, toplevel_enter_output, toplevel_enter_workspace,
                 toplevel_leave_output, toplevel_leave_workspace,
@@ -3422,6 +3423,11 @@ impl Shell {
         }
     }
 
+    /// Handle a context menu request from a client or input grab.
+    ///
+    /// When a desktop-shell client is connected, the menu is sent via the
+    /// `lunaris-shell-overlay-v1` protocol and rendered by desktop-shell.
+    /// When no shell client is connected, the grab falls back to Iced rendering.
     pub fn menu_request(
         &self,
         is_client_initiated: bool,
@@ -3432,7 +3438,69 @@ impl Shell {
         target_stack: bool,
         config: &Config,
         evlh: &LoopHandle<'static, State>,
+        shell_overlay_state: &mut ShellOverlayState,
+        pending_callbacks: &mut std::collections::HashMap<u32, Vec<Item>>,
     ) -> Option<(MenuGrab, Focus)> {
+        /// Convert items to protocol representation.
+        /// Items without a `WindowAction` tag produce a `Separator` placeholder
+        /// so that indices in `pending_callbacks` stay aligned with the protocol list.
+        fn items_to_protocol(items: &[Item]) -> Vec<ContextMenuItem> {
+            items
+                .iter()
+                .map(|item| match item {
+                    Item::Separator => ContextMenuItem::Separator,
+                    Item::Entry {
+                        action: Some(action),
+                        toggled,
+                        disabled,
+                        shortcut,
+                        ..
+                    } => ContextMenuItem::Entry {
+                        action: *action,
+                        toggled: *toggled,
+                        disabled: *disabled,
+                        shortcut: shortcut.clone(),
+                    },
+                    Item::Entry { action: None, .. } | Item::Submenu { .. } => {
+                        tracing::warn!(
+                            "menu_request: item without WindowAction in overlay path; \
+                             using Separator placeholder to preserve index alignment"
+                        );
+                        ContextMenuItem::Separator
+                    }
+                })
+                .collect()
+        }
+
+        /// Find the desktop-shell's wl_surface by matching the overlay client.
+        /// Returns the `PointerFocusTarget` and the surface origin in logical
+        /// coordinates (used as pointer-event offset in the grab).
+        fn find_shell_focus(
+            shell: &Shell,
+            shell_overlay_state: &ShellOverlayState,
+        ) -> Option<(focus::target::PointerFocusTarget, Point<f64, Logical>)> {
+            use smithay::reexports::wayland_server::Resource;
+            let instance = shell_overlay_state.overlay_instance()?;
+            for mapped in shell.mapped() {
+                let Some(surface) = mapped.wl_surface() else {
+                    continue;
+                };
+                if (&*surface).id().same_client_as(&instance.id()) {
+                    let origin = shell
+                        .space_for(mapped)
+                        .and_then(|ws| ws.element_geometry(mapped))
+                        .map(|geo| geo.loc.as_logical().to_f64())
+                        .unwrap_or_default();
+                    let target = focus::target::PointerFocusTarget::WlSurface {
+                        surface: surface.into_owned(),
+                        toplevel: None,
+                    };
+                    return Some((target, origin));
+                }
+            }
+            None
+        }
+
         let serial = serial.into();
         let Some(GrabStartData::Pointer(start_data)) =
             check_grab_preconditions(seat, serial, is_client_initiated.then_some(surface))
@@ -3537,15 +3605,36 @@ impl Shell {
             return None;
         };
 
+        // Collect items so we can both send them over the protocol and pass
+        // callbacks to the grab.
+        let items: Vec<Item> = menu_items.collect();
+
+        // Try the overlay protocol path first.
+        let (menu_id, shell_focus) =
+            if let Some(menu_id) = shell_overlay_state.send_context_menu(
+                global_position.x,
+                global_position.y,
+                &items_to_protocol(&items),
+            ) {
+                let shell_focus = find_shell_focus(self, shell_overlay_state);
+                pending_callbacks.insert(menu_id, items.clone());
+                (Some(menu_id), shell_focus)
+            } else {
+                // No shell client connected - fall back to Iced rendering.
+                (None, None)
+            };
+
         let grab = MenuGrab::new(
             GrabStartData::Pointer(start_data),
             seat,
-            menu_items,
+            items.into_iter(),
             global_position,
             MenuAlignment::CORNER,
             None,
             evlh.clone(),
             self.theme.clone(),
+            menu_id,
+            shell_focus,
         );
 
         Some((grab, Focus::Keep))

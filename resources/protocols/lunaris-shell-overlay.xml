@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="lunaris_shell_overlay">
+  <copyright>
+    SPDX-License-Identifier: GPL-2.0-or-later
+  </copyright>
+
+  <description summary="Lunaris shell overlay protocol">
+    This protocol allows the Lunaris compositor to delegate rendering of
+    shell overlay elements (context menus, tab bars, indicators) to the
+    desktop-shell process.
+
+    The compositor acts as the server; the desktop-shell binds this global
+    and receives overlay events. The desktop-shell sends back user actions.
+  </description>
+
+  <interface name="lunaris_shell_overlay_v1" version="1">
+    <description summary="shell overlay manager">
+      Singleton global. The desktop-shell binds this interface once at
+      startup to receive overlay events from the compositor.
+    </description>
+
+    <!-- ===== Context Menu ===== -->
+
+    <event name="context_menu_begin">
+      <description summary="begin a context menu sequence">
+        Sent before any context_menu_item or context_menu_separator events.
+        x and y are global compositor coordinates where the menu should appear.
+        menu_id uniquely identifies this menu instance.
+      </description>
+      <arg name="menu_id" type="uint" summary="unique menu instance id"/>
+      <arg name="x" type="int" summary="x position in compositor global coordinates"/>
+      <arg name="y" type="int" summary="y position in compositor global coordinates"/>
+    </event>
+
+    <event name="context_menu_item">
+      <description summary="a single context menu item">
+        Sent once per item after context_menu_begin, before context_menu_done.
+        index is used when the shell sends activate back to the compositor.
+        shortcut may be an empty string if no shortcut is defined.
+        toggled and disabled are boolean (0 or 1).
+      </description>
+      <arg name="menu_id" type="uint" summary="menu instance id"/>
+      <arg name="index" type="uint" summary="item index, used for activation"/>
+      <arg name="action" type="uint" enum="window_action" summary="the action this item triggers"/>
+      <arg name="toggled" type="uint" summary="1 if item is in toggled/checked state"/>
+      <arg name="disabled" type="uint" summary="1 if item is disabled/grayed out"/>
+      <arg name="shortcut" type="string" summary="keyboard shortcut label, may be empty"/>
+    </event>
+
+    <event name="context_menu_separator">
+      <description summary="a separator in the context menu">
+        Sent in place of context_menu_item for visual separators.
+        index is incremented as normal so subsequent item indices remain stable.
+      </description>
+      <arg name="menu_id" type="uint" summary="menu instance id"/>
+      <arg name="index" type="uint" summary="separator index"/>
+    </event>
+
+    <event name="context_menu_done">
+      <description summary="end of context menu item sequence">
+        Sent after all items have been sent. The shell should display the menu
+        after receiving this event.
+      </description>
+      <arg name="menu_id" type="uint" summary="menu instance id"/>
+    </event>
+
+    <event name="context_menu_closed">
+      <description summary="compositor closed the context menu">
+        Sent when the compositor dismisses the menu (e.g. focus lost, window
+        closed). The shell must hide the menu without sending activate or dismiss.
+      </description>
+      <arg name="menu_id" type="uint" summary="menu instance id"/>
+    </event>
+
+    <request name="activate">
+      <description summary="user activated a menu item">
+        Sent by the shell when the user clicks a menu item.
+        The compositor looks up index in the pending callback list and
+        invokes the corresponding action.
+      </description>
+      <arg name="menu_id" type="uint" summary="menu instance id"/>
+      <arg name="index" type="uint" summary="index of the activated item"/>
+    </request>
+
+    <request name="dismiss">
+      <description summary="user dismissed the menu without activating an item">
+        Sent when the user closes the menu without selecting anything.
+      </description>
+      <arg name="menu_id" type="uint" summary="menu instance id"/>
+    </request>
+
+    <!-- ===== Window Actions Enum ===== -->
+
+    <enum name="window_action">
+      <description summary="window management actions for context menu items"/>
+      <entry name="minimize"             value="1"  summary="minimize the window"/>
+      <entry name="maximize"             value="2"  summary="toggle maximize"/>
+      <entry name="fullscreen"           value="3"  summary="toggle fullscreen"/>
+      <entry name="tiled"                value="4"  summary="toggle tiled mode"/>
+      <entry name="move"                 value="5"  summary="start interactive move"/>
+      <entry name="resize_top"           value="6"  summary="start resize from top edge"/>
+      <entry name="resize_left"          value="7"  summary="start resize from left edge"/>
+      <entry name="resize_right"         value="8"  summary="start resize from right edge"/>
+      <entry name="resize_bottom"        value="9"  summary="start resize from bottom edge"/>
+      <entry name="stack"                value="10" summary="stack this window"/>
+      <entry name="unstack"              value="11" summary="unstack this tab from its stack"/>
+      <entry name="unstack_all"          value="12" summary="unstack all tabs"/>
+      <entry name="screenshot"           value="13" summary="take a screenshot of the window"/>
+      <entry name="move_prev_workspace"  value="14" summary="move window to previous workspace"/>
+      <entry name="move_next_workspace"  value="15" summary="move window to next workspace"/>
+      <entry name="sticky"               value="16" summary="toggle sticky (show on all workspaces)"/>
+      <entry name="close"                value="17" summary="close the window"/>
+      <entry name="close_all"            value="18" summary="close all windows in a stack"/>
+    </enum>
+
+  </interface>
+
+</protocol>

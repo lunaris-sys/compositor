@@ -373,6 +373,7 @@ impl XdgShellHandler for State {
             false,
             &self.common.config,
             &self.common.event_loop_handle,
+            &self.common.display_handle,
             &mut self.common.shell_overlay_state,
             &mut self.common.pending_menu_callbacks,
         );

@@ -46,7 +46,7 @@ use smithay::{
     output::{Output, WeakOutput},
     reexports::{
         wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1,
-        wayland_server::{Client, protocol::wl_surface::WlSurface},
+        wayland_server::{Client, DisplayHandle, protocol::wl_surface::WlSurface},
     },
     utils::{IsAlive, Logical, Point, Rectangle, Serial, Size},
     wayland::{
@@ -3438,6 +3438,7 @@ impl Shell {
         target_stack: bool,
         config: &Config,
         evlh: &LoopHandle<'static, State>,
+        dh: &DisplayHandle,
         shell_overlay_state: &mut ShellOverlayState,
         pending_callbacks: &mut std::collections::HashMap<u32, Vec<Item>>,
     ) -> Option<(MenuGrab, Focus)> {
@@ -3478,14 +3479,36 @@ impl Shell {
         fn find_shell_focus(
             shell: &Shell,
             shell_overlay_state: &ShellOverlayState,
+            dh: &DisplayHandle,
         ) -> Option<(focus::target::PointerFocusTarget, Point<f64, Logical>)> {
             use smithay::reexports::wayland_server::Resource;
             let instance = shell_overlay_state.overlay_instance()?;
+            // The overlay instance and the XDG window surface live on separate Wayland
+            // connections (different client IDs) but belong to the same process (same PID).
+            // Match by PID instead of client identity.
+            let overlay_pid = instance
+                .client()
+                .and_then(|c| c.get_credentials(dh).ok())
+                .map(|creds| creds.pid);
+            tracing::info!(
+                "find_shell_focus: overlay instance PID = {:?}",
+                overlay_pid
+            );
+            let overlay_pid = overlay_pid?;
             for mapped in shell.mapped() {
                 let Some(surface) = mapped.wl_surface() else {
                     continue;
                 };
-                if (&*surface).id().same_client_as(&instance.id()) {
+                let surface_pid = (&*surface)
+                    .client()
+                    .and_then(|c| c.get_credentials(dh).ok())
+                    .map(|creds| creds.pid);
+                tracing::info!(
+                    "find_shell_focus: mapped surface PID = {:?}",
+                    surface_pid,
+                );
+                if surface_pid == Some(overlay_pid) {
+                    tracing::info!("find_shell_focus: MATCH found, returning focus target");
                     let origin = shell
                         .space_for(mapped)
                         .and_then(|ws| ws.element_geometry(mapped))
@@ -3498,6 +3521,7 @@ impl Shell {
                     return Some((target, origin));
                 }
             }
+            tracing::info!("find_shell_focus: NO match found, returning None");
             None
         }
 
@@ -3616,7 +3640,7 @@ impl Shell {
                 global_position.y,
                 &items_to_protocol(&items),
             ) {
-                let shell_focus = find_shell_focus(self, shell_overlay_state);
+                let shell_focus = find_shell_focus(self, shell_overlay_state, dh);
                 pending_callbacks.insert(menu_id, items.clone());
                 (Some(menu_id), shell_focus)
             } else {

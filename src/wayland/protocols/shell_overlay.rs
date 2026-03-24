@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
+
+//! Server-side implementation of the `lunaris-shell-overlay-v1` Wayland protocol.
+//!
+//! This protocol allows the Lunaris compositor to delegate rendering of shell
+//! overlay elements (context menus, tab bars, indicators) to the desktop-shell
+//! process. The compositor sends overlay events; the desktop-shell sends back
+//! user actions.
+
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
@@ -28,12 +36,20 @@ mod generated {
 
 // ===== Global data =====
 
+/// Per-global data for the `lunaris_shell_overlay_v1` global.
+///
+/// Holds the client filter that determines which clients may bind this global.
 pub struct ShellOverlayGlobalData {
+    /// Returns `true` if the given client is permitted to bind this global.
     pub filter: Box<dyn for<'a> Fn(&'a Client) -> bool + Send + Sync>,
 }
 
 // ===== State =====
 
+/// Server-side state for the `lunaris-shell-overlay-v1` protocol.
+///
+/// Tracks all bound instances and assigns monotonically increasing menu IDs
+/// to each context menu sequence.
 #[derive(Debug)]
 pub struct ShellOverlayState {
     instances: Vec<LunarisShellOverlayV1>,
@@ -42,6 +58,10 @@ pub struct ShellOverlayState {
 }
 
 impl ShellOverlayState {
+    /// Create a new `ShellOverlayState` and register the global with the display.
+    ///
+    /// `client_filter` is called for each connecting client; return `true` to
+    /// allow the client to bind the global.
     pub fn new<D, F>(dh: &DisplayHandle, client_filter: F) -> ShellOverlayState
     where
         D: GlobalDispatch<LunarisShellOverlayV1, ShellOverlayGlobalData>
@@ -63,12 +83,17 @@ impl ShellOverlayState {
         }
     }
 
+    /// Returns the `GlobalId` of the registered Wayland global.
     pub fn global_id(&self) -> GlobalId {
         self.global.clone()
     }
 
-    /// Send a context menu to all connected shell clients.
-    /// Returns the menu_id assigned to this menu, or None if no client is connected.
+    /// Send a context menu sequence to all connected shell clients.
+    ///
+    /// Sends `context_menu_begin`, one event per item, then `context_menu_done`.
+    ///
+    /// Returns the `menu_id` assigned to this menu, or `None` if no shell
+    /// client is currently connected.
     pub fn send_context_menu(
         &mut self,
         x: i32,
@@ -99,7 +124,8 @@ impl ShellOverlayState {
                         instance.context_menu_item(
                             menu_id,
                             index as u32,
-                            lunaris_shell_overlay_v1::WindowAction::try_from(*action as u32).unwrap(),
+                            lunaris_shell_overlay_v1::WindowAction::try_from(*action as u32)
+                                .unwrap(),
                             *toggled as u32,
                             *disabled as u32,
                             shortcut.clone().unwrap_or_default(),
@@ -114,7 +140,10 @@ impl ShellOverlayState {
         Some(menu_id)
     }
 
-    /// Notify shell that a menu was closed by the compositor (e.g. window closed).
+    /// Notify all connected shell clients that a context menu was closed by the
+    /// compositor (e.g. the associated window was closed or focus was lost).
+    ///
+    /// The shell must hide the menu without sending `activate` or `dismiss`.
     pub fn close_context_menu(&self, menu_id: u32) {
         for instance in &self.instances {
             instance.context_menu_closed(menu_id);
@@ -124,26 +153,45 @@ impl ShellOverlayState {
 
 // ===== Menu item types =====
 
+/// A window management action that can appear as a context menu entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum WindowAction {
+    /// Minimize the window.
     Minimize = 1,
+    /// Toggle maximize.
     Maximize = 2,
+    /// Toggle fullscreen.
     Fullscreen = 3,
+    /// Toggle tiled mode.
     Tiled = 4,
+    /// Start an interactive move.
     Move = 5,
+    /// Start a resize from the top edge.
     ResizeTop = 6,
+    /// Start a resize from the left edge.
     ResizeLeft = 7,
+    /// Start a resize from the right edge.
     ResizeRight = 8,
+    /// Start a resize from the bottom edge.
     ResizeBottom = 9,
+    /// Stack this window with another.
     Stack = 10,
+    /// Remove this tab from its stack.
     Unstack = 11,
+    /// Remove all tabs from a stack.
     UnstackAll = 12,
+    /// Take a screenshot of the window.
     Screenshot = 13,
+    /// Move the window to the previous workspace.
     MovePrevWorkspace = 14,
+    /// Move the window to the next workspace.
     MoveNextWorkspace = 15,
+    /// Toggle sticky (show on all workspaces).
     Sticky = 16,
+    /// Close the window.
     Close = 17,
+    /// Close all windows in a stack.
     CloseAll = 18,
 }
 
@@ -175,23 +223,37 @@ impl TryFrom<u32> for WindowAction {
     }
 }
 
+/// A single item in a context menu sent to the shell.
 #[derive(Debug, Clone)]
 pub enum ContextMenuItem {
+    /// A visual separator between groups of items.
     Separator,
+    /// An actionable entry.
     Entry {
+        /// The window management action this item triggers.
         action: WindowAction,
+        /// Whether the item is in a toggled/checked state (e.g. "Sticky" when active).
         toggled: bool,
+        /// Whether the item is disabled and cannot be activated.
         disabled: bool,
+        /// Optional keyboard shortcut label shown alongside the item.
         shortcut: Option<String>,
     },
 }
 
 // ===== Handler trait =====
 
+/// Handler trait for `lunaris-shell-overlay-v1` compositor-side logic.
+///
+/// Implement this on your compositor state to receive shell overlay events.
 pub trait ShellOverlayHandler {
+    /// Returns a mutable reference to the `ShellOverlayState`.
     fn shell_overlay_state(&mut self) -> &mut ShellOverlayState;
 
     /// Called when the shell activates a context menu item.
+    ///
+    /// The compositor should look up the pending callbacks for `menu_id` and
+    /// invoke the one at position `action`.
     fn context_menu_activate(&mut self, menu_id: u32, action: WindowAction);
 
     /// Called when the shell dismisses a context menu without activating an item.
@@ -273,6 +335,9 @@ where
 
 // ===== Delegate macro =====
 
+/// Delegate `lunaris_shell_overlay_v1` dispatch to [`ShellOverlayState`].
+///
+/// Call this macro once in the crate that implements the compositor state.
 #[macro_export]
 macro_rules! delegate_shell_overlay {
     ($ty:ty) => {
@@ -284,4 +349,34 @@ macro_rules! delegate_shell_overlay {
             $crate::wayland::protocols::shell_overlay::lunaris_shell_overlay_v1::LunarisShellOverlayV1: ()
         ] => $crate::wayland::protocols::shell_overlay::ShellOverlayState);
     };
+}
+
+// ===== Tests =====
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_action_roundtrip() {
+        for value in 1u32..=18 {
+            let action = WindowAction::try_from(value).expect("value in range should parse");
+            assert_eq!(action as u32, value, "roundtrip failed for value {value}");
+        }
+    }
+
+    #[test]
+    fn window_action_invalid_returns_err() {
+        assert!(WindowAction::try_from(0).is_err());
+        assert!(WindowAction::try_from(19).is_err());
+        assert!(WindowAction::try_from(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn menu_id_wraps_without_panic() {
+        // Verify wrapping_add does not panic at u32::MAX
+        let id = u32::MAX;
+        let next = id.wrapping_add(1);
+        assert_eq!(next, 0);
+    }
 }

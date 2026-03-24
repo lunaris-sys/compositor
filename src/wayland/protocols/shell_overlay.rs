@@ -254,7 +254,7 @@ pub trait ShellOverlayHandler {
     ///
     /// The compositor should look up the pending callbacks for `menu_id` and
     /// invoke the one at position `action`.
-    fn context_menu_activate(&mut self, menu_id: u32, action: WindowAction);
+    fn context_menu_activate(&mut self, menu_id: u32, index: u32);
 
     /// Called when the shell dismisses a context menu without activating an item.
     fn context_menu_dismiss(&mut self, menu_id: u32);
@@ -303,15 +303,8 @@ where
         _data_init: &mut DataInit<'_, D>,
     ) {
         match request {
-            OverlayRequest::Activate { menu_id, index } => {
-                if let Ok(action) = WindowAction::try_from(index) {
-                    state.context_menu_activate(menu_id, action);
-                } else {
-                    tracing::warn!(
-                        "shell_overlay: received activate with unknown action index {}",
-                        index
-                    );
-                }
+           OverlayRequest::Activate { menu_id, index } => {
+                state.context_menu_activate(menu_id, index);
             }
             OverlayRequest::Dismiss { menu_id } => {
                 state.context_menu_dismiss(menu_id);

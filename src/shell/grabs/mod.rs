@@ -84,7 +84,7 @@ pub enum ReleaseMode {
     NoMouseButtons,
 }
 
-mod menu;
+pub mod menu;
 pub use self::menu::*;
 mod moving;
 pub use self::moving::SeatMoveGrabState;

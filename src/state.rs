@@ -22,6 +22,7 @@ use crate::{
             output_configuration::OutputConfigurationState,
             output_power::OutputPowerState,
             overlap_notify::OverlapNotifyState,
+            shell_overlay::{ShellOverlayHandler, ShellOverlayState, WindowAction},
             toplevel_info::ToplevelInfoState,
             toplevel_management::{ManagementCapabilities, ToplevelManagementState},
             workspace::{WorkspaceState, WorkspaceUpdateGuard},
@@ -123,7 +124,7 @@ use std::os::fd::OwnedFd;
 use std::{
     cell::RefCell,
     cmp::min,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     process::Child,
     sync::{Arc, LazyLock, Once, atomic::AtomicBool},
@@ -278,6 +279,10 @@ pub struct Common {
     pub kde_decoration_state: KdeDecorationState,
     pub xdg_decoration_state: XdgDecorationState,
     pub overlap_notify_state: OverlapNotifyState,
+    pub shell_overlay_state: ShellOverlayState,
+    /// Pending context menu callbacks keyed by menu_id.
+    /// Populated by MenuGrab when a menu is sent to the shell.
+    pub pending_menu_callbacks: HashMap<u32, Vec<crate::shell::grabs::menu::Item>>,
     pub a11y_state: A11yState,
     pub a11y_keyboard_monitor_state: A11yKeyboardMonitorState,
 
@@ -649,6 +654,8 @@ impl State {
         let output_power_state = OutputPowerState::new::<Self, _>(dh, client_not_sandboxed);
         let overlap_notify_state =
             OverlapNotifyState::new::<Self, _>(dh, client_has_no_security_context);
+        let shell_overlay_state =
+            ShellOverlayState::new::<Self, _>(dh, client_has_no_security_context);
         let presentation_state = PresentationState::new::<Self>(dh, clock.id() as u32);
         let primary_selection_state = PrimarySelectionState::new::<Self>(dh);
         let cosmic_image_capture_source_state =
@@ -778,6 +785,8 @@ impl State {
                 output_configuration_state,
                 output_power_state,
                 overlap_notify_state,
+                shell_overlay_state,
+                pending_menu_callbacks: HashMap::new(),
                 presentation_state,
                 primary_selection_state,
                 ext_data_control_state,

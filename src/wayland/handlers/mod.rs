@@ -26,6 +26,7 @@ pub mod output;
 pub mod output_configuration;
 pub mod output_power;
 pub mod overlap_notify;
+pub mod shell_overlay;
 pub mod pointer_constraints;
 pub mod pointer_gestures;
 pub mod presentation;

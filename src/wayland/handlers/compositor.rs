@@ -21,7 +21,7 @@ use smithay::{
         drm_syncobj::DrmSyncobjCachedState,
         seat::WaylandFocus,
         shell::{
-            wlr_layer::LayerSurfaceAttributes,
+            wlr_layer::{Anchor, ExclusiveZone, LayerSurfaceAttributes, LayerSurfaceCachedState},
             xdg::{
                 ToplevelSurface, XdgPopupSurfaceRoleAttributes, XdgToplevelSurfaceRoleAttributes,
             },
@@ -362,6 +362,19 @@ impl CompositorHandler for State {
             .cloned();
 
         if let Some(output) = layer_output {
+            // Smithay returns None for effective_exclusive_edge when all 4
+            // anchors are set, silently disabling the exclusive zone. Fix by
+            // setting exclusive_edge explicitly before arrange() runs.
+            with_states(surface, |states| {
+                let mut guard = states.cached_state.get::<LayerSurfaceCachedState>();
+                let state = guard.current();
+                if state.anchor == Anchor::all()
+                    && matches!(state.exclusive_zone, ExclusiveZone::Exclusive(_))
+                    && state.exclusive_edge.is_none()
+                {
+                    state.exclusive_edge = Some(Anchor::TOP);
+                }
+            });
             let changed = layer_map_for_output(&output).arrange();
             if changed {
                 shell.workspaces.recalculate();

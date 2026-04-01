@@ -66,7 +66,7 @@ impl Default for AppearanceConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, CosmicConfigEntry)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, CosmicConfigEntry)]
 #[version = 1]
 pub struct CosmicCompConfig {
     pub workspaces: workspace::WorkspaceConfig,

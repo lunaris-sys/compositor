@@ -9,7 +9,9 @@ use crate::{
     },
 };
 use anyhow::Context;
-use cosmic_config::{ConfigGet, CosmicConfigEntry};
+// cosmic_config is still needed for CosmicTk watcher, Shortcuts, WindowRules,
+// and the legacy cosmic_helper write-back used by zoom.rs.
+use cosmic_config::CosmicConfigEntry;
 use cosmic_settings_config::window_rules::ApplicationException;
 use cosmic_settings_config::{Shortcuts, shortcuts, window_rules};
 use serde::{Deserialize, Serialize};
@@ -30,7 +32,7 @@ pub use smithay::{
 };
 use std::{
     cell::{Ref, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
@@ -45,13 +47,11 @@ mod types;
 use cosmic::config::CosmicTk;
 pub use cosmic_comp_config::EdidProduct;
 use cosmic_comp_config::{
-    AppearanceConfig, CosmicCompConfig, KeyboardConfig, TileBehavior, XkbConfig, XwaylandDescaling,
-    XwaylandEavesdropping, ZoomConfig,
+    CosmicCompConfig, XkbConfig,
     input::{DeviceState as InputDeviceState, InputConfig, TouchpadOverride},
     output::comp::{
         OutputConfig, OutputInfo, OutputState, OutputsConfig, TransformDef, load_outputs,
     },
-    workspace::WorkspaceConfig,
 };
 pub use key_bindings::{Action, PrivateAction};
 use types::WlXkbConfig;
@@ -59,8 +59,12 @@ use types::WlXkbConfig;
 #[derive(Debug)]
 pub struct Config {
     pub dynamic_conf: DynamicConfig,
+    /// Path to the Lunaris TOML compositor config file.
+    pub toml_path: PathBuf,
+    /// Legacy cosmic-config handle, used by zoom.rs for writing config back.
+    /// Will be removed when zoom.rs is replaced.
     pub cosmic_helper: cosmic_config::Config,
-    /// cosmic-config comp configuration for `com.system76.CosmicComp`
+    /// Compositor configuration loaded from TOML.
     pub cosmic_conf: CosmicCompConfig,
     /// cosmic-config context for `com.system76.CosmicSettings.Shortcuts`
     pub settings_context: cosmic_config::Config,
@@ -167,26 +171,86 @@ pub enum ColorFilter {
     Tritanopia = 4,
 }
 
+/// Default TOML config path.
+const DEFAULT_TOML_PATH: &str = ".config/lunaris/compositor.toml";
+
+/// Load CosmicCompConfig from a TOML file, falling back to defaults.
+fn load_toml_config(path: &std::path::Path) -> CosmicCompConfig {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match toml::from_str::<CosmicCompConfig>(&contents) {
+            Ok(config) => {
+                tracing::info!("loaded compositor config from {}", path.display());
+                config
+            }
+            Err(err) => {
+                warn!(?err, "failed to parse compositor.toml, using defaults");
+                CosmicCompConfig::default()
+            }
+        },
+        Err(_) => {
+            tracing::info!(
+                "no compositor.toml at {}, using defaults",
+                path.display()
+            );
+            CosmicCompConfig::default()
+        }
+    }
+}
+
 impl Config {
     pub fn load(loop_handle: &LoopHandle<'_, State>) -> Config {
-        let config = cosmic_config::Config::new("com.system76.CosmicComp", 1).unwrap();
-        let source = cosmic_config::calloop::ConfigWatchSource::new(&config).unwrap();
-        loop_handle
-            .insert_source(source, |(config, keys), (), state| {
-                config_changed(config, keys, state);
-            })
-            .expect("Failed to add cosmic-config to the event loop");
         let xdg = xdg::BaseDirectories::new();
 
-        let cosmic_comp_config =
-            CosmicCompConfig::get_entry(&config).unwrap_or_else(|(errs, c)| {
-                if cfg!(debug_assertions) {
-                    for err in errs {
-                        warn!(?err, "");
+        // Load compositor config from TOML.
+        let toml_path = std::env::var("LUNARIS_COMPOSITOR_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                PathBuf::from(home).join(DEFAULT_TOML_PATH)
+            });
+
+        let cosmic_comp_config = load_toml_config(&toml_path);
+
+        // Watch the TOML config file for changes via notify.
+        if let Some(parent) = toml_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        {
+            let watch_path = toml_path.clone();
+            let (notify_tx, notify_rx) = calloop::channel::channel::<()>();
+            let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
+                if let Ok(event) = res {
+                    // Editors do atomic writes (rename), so watch for Create and Modify.
+                    use notify::EventKind;
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) {
+                        let _ = notify_tx.send(());
                     }
                 }
-                c
-            });
+            })
+            .expect("failed to create config file watcher");
+
+            // Watch the parent directory (editors do atomic renames).
+            if let Some(parent) = watch_path.parent() {
+                use notify::Watcher;
+                watcher
+                    .watch(parent, notify::RecursiveMode::NonRecursive)
+                    .expect("failed to watch config directory");
+            }
+
+            let toml_path_for_handler = watch_path;
+            loop_handle
+                .insert_source(notify_rx, move |_, _, state| {
+                    toml_config_changed(&toml_path_for_handler, state);
+                })
+                .expect("failed to add config watcher to event loop");
+
+            // Leak the watcher so it stays alive for the process lifetime.
+            // Same pattern as theme.rs (std::mem::forget on watchers).
+            std::mem::forget(watcher);
+        }
 
         // Listen for updates to the toolkit config
         if let Ok(tk_config) = cosmic_config::Config::new("com.system76.CosmicTk", 1) {
@@ -323,10 +387,15 @@ impl Config {
                 .set_screen_filter(filter_conf.color_filter);
         });
 
+        // Legacy cosmic-config handle kept for zoom.rs write-back.
+        let cosmic_helper =
+            cosmic_config::Config::new("com.system76.CosmicComp", 1).unwrap();
+
         Config {
             dynamic_conf: Self::load_dynamic(&xdg),
             cosmic_conf: cosmic_comp_config,
-            cosmic_helper: config,
+            toml_path,
+            cosmic_helper,
             settings_context,
             shortcuts,
             system_actions,
@@ -747,16 +816,6 @@ pub fn xkb_config_to_wl(config: &XkbConfig) -> WlXkbConfig<'_> {
     }
 }
 
-fn get_config<T: Default + serde::de::DeserializeOwned>(
-    config: &cosmic_config::Config,
-    key: &str,
-) -> T {
-    config.get(key).unwrap_or_else(|err| {
-        error!(?err, "Failed to read config '{}'", key);
-        T::default()
-    })
-}
-
 fn update_input(state: &mut State) {
     if let BackendData::Kms(kms_state) = &mut state.backend {
         for device in kms_state.input_devices.values_mut() {
@@ -789,170 +848,123 @@ pub fn change_modifier_state(
     input(smithay_input::KeyState::Released, scan_code);
 }
 
-fn config_changed(config: cosmic_config::Config, keys: Vec<String>, state: &mut State) {
-    for key in &keys {
-        match key.as_str() {
-            "xkb_config" => {
-                let value = get_config::<XkbConfig>(&config, "xkb_config");
-                let seats = state
-                    .common
-                    .shell
-                    .read()
-                    .seats
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for seat in seats.into_iter() {
-                    if let Some(keyboard) = seat.get_keyboard() {
-                        let old_modifier_state = keyboard.modifier_state();
-                        keyboard.change_repeat_info(
-                            (value.repeat_rate as i32).abs(), // Negative values are illegal
-                            (value.repeat_delay as i32).abs(),
-                        );
-                        if let Err(err) = keyboard.set_xkb_config(state, xkb_config_to_wl(&value)) {
-                            error!(?err, "Failed to load provided xkb config");
-                            // TODO Revert to default?
-                        }
+/// Called when the TOML config file changes. Reloads the full config and
+/// applies side effects for any fields that differ from the current state.
+/// Called when the TOML config file changes. Reloads the full config and
+/// applies side effects for any fields that differ from the current state.
+fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
+    let new = load_toml_config(toml_path);
 
-                        // Press and release the numlock key to update modifiers.
-                        if old_modifier_state.num_lock != keyboard.modifier_state().num_lock {
-                            const NUMLOCK_SCANCODE: u32 = 69;
-                            change_modifier_state(&keyboard, NUMLOCK_SCANCODE, state);
-                        }
-                        if old_modifier_state.caps_lock != keyboard.modifier_state().caps_lock {
-                            const CAPSLOCK_SCANCODE: u32 = 58;
-                            change_modifier_state(&keyboard, CAPSLOCK_SCANCODE, state);
-                        }
-                    }
-                }
-                state.common.config.cosmic_conf.xkb_config = value;
-            }
-            "keyboard_config" => {
-                let value = get_config::<KeyboardConfig>(&config, "keyboard_config");
-                state.common.config.cosmic_conf.keyboard_config = value;
-                let shell = state.common.shell.read();
-                let seat = shell.seats.last_active();
-                state.common.config.dynamic_conf.numlock_mut().last_state =
-                    seat.get_keyboard().unwrap().modifier_state().num_lock;
-            }
-            "input_default" => {
-                let value = get_config::<InputConfig>(&config, "input_default");
-                state.common.config.cosmic_conf.input_default = value;
-                update_input(state);
-            }
-            "input_touchpad" => {
-                let value = get_config::<InputConfig>(&config, "input_touchpad");
-                state.common.config.cosmic_conf.input_touchpad = value;
-                update_input(state);
-            }
-            "input_touchpad_override" => {
-                let value = get_config::<TouchpadOverride>(&config, "input_touchpad_override");
-                state.common.config.cosmic_conf.input_touchpad_override = value;
-                update_input(state)
-            }
-            "input_devices" => {
-                let value = get_config::<HashMap<String, InputConfig>>(&config, "input_devices");
-                state.common.config.cosmic_conf.input_devices = value;
-                update_input(state);
-            }
-            "workspaces" => {
-                state.common.config.cosmic_conf.workspaces =
-                    get_config::<WorkspaceConfig>(&config, "workspaces");
-                state.common.update_config();
-            }
-            "autotile" => {
-                let new = get_config::<bool>(&config, "autotile");
-                if new != state.common.config.cosmic_conf.autotile {
-                    state.common.config.cosmic_conf.autotile = new;
+    // Compare old vs new to determine which side effects to trigger.
+    // We clone the old config so we can assign the new one early and avoid
+    // borrow conflicts with &state.
+    let old = state.common.config.cosmic_conf.clone();
+    state.common.config.cosmic_conf = new.clone();
 
-                    let mut shell = state.common.shell.write();
-                    let shell_ref = &mut *shell;
-                    shell_ref.workspaces.update_autotile(
-                        new,
-                        &mut state.common.workspace_state.update(),
-                        shell_ref.seats.iter(),
-                    );
+    // xkb_config
+    if new.xkb_config != old.xkb_config {
+        let value = &new.xkb_config;
+        let seats = state
+            .common
+            .shell
+            .read()
+            .seats
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for seat in seats.into_iter() {
+            if let Some(keyboard) = seat.get_keyboard() {
+                let old_modifier_state = keyboard.modifier_state();
+                keyboard.change_repeat_info(
+                    (value.repeat_rate as i32).abs(),
+                    (value.repeat_delay as i32).abs(),
+                );
+                if let Err(err) = keyboard.set_xkb_config(state, xkb_config_to_wl(value)) {
+                    error!(?err, "Failed to load provided xkb config");
+                }
+                if old_modifier_state.num_lock != keyboard.modifier_state().num_lock {
+                    const NUMLOCK_SCANCODE: u32 = 69;
+                    change_modifier_state(&keyboard, NUMLOCK_SCANCODE, state);
+                }
+                if old_modifier_state.caps_lock != keyboard.modifier_state().caps_lock {
+                    const CAPSLOCK_SCANCODE: u32 = 58;
+                    change_modifier_state(&keyboard, CAPSLOCK_SCANCODE, state);
                 }
             }
-            "autotile_behavior" => {
-                let new = get_config::<TileBehavior>(&config, "autotile_behavior");
-                if new != state.common.config.cosmic_conf.autotile_behavior {
-                    state.common.config.cosmic_conf.autotile_behavior = new;
+        }
+    }
 
-                    let mut shell = state.common.shell.write();
-                    let shell_ref = &mut *shell;
-                    shell_ref.workspaces.update_autotile_behavior(
-                        new,
-                        &mut state.common.workspace_state.update(),
-                        shell_ref.seats.iter(),
-                    );
-                }
-            }
-            "active_hint" => {
-                let new = get_config::<bool>(&config, "active_hint");
-                if new != state.common.config.cosmic_conf.active_hint {
-                    state.common.config.cosmic_conf.active_hint = new;
-                    state.common.update_config();
-                }
-            }
-            "descale_xwayland" => {
-                let new = get_config::<XwaylandDescaling>(&config, "descale_xwayland");
-                if new != state.common.config.cosmic_conf.descale_xwayland {
-                    state.common.config.cosmic_conf.descale_xwayland = new;
-                    state.common.update_xwayland_settings();
-                }
-            }
-            "xwayland_eavesdropping" => {
-                let new = get_config::<XwaylandEavesdropping>(&config, "xwayland_eavesdropping");
-                if new != state.common.config.cosmic_conf.xwayland_eavesdropping {
-                    state.common.config.cosmic_conf.xwayland_eavesdropping = new;
-                    state
-                        .common
-                        .xwayland_reset_eavesdropping(SERIAL_COUNTER.next_serial());
-                }
-            }
-            "focus_follows_cursor" => {
-                let new = get_config::<bool>(&config, "focus_follows_cursor");
-                if new != state.common.config.cosmic_conf.focus_follows_cursor {
-                    state.common.config.cosmic_conf.focus_follows_cursor = new;
-                }
-            }
-            "cursor_follows_focus" => {
-                let new = get_config::<bool>(&config, "cursor_follows_focus");
-                if new != state.common.config.cosmic_conf.cursor_follows_focus {
-                    state.common.config.cosmic_conf.cursor_follows_focus = new;
-                }
-            }
-            "focus_follows_cursor_delay" => {
-                let new = get_config::<u64>(&config, "focus_follows_cursor_delay");
-                if new != state.common.config.cosmic_conf.focus_follows_cursor_delay {
-                    state.common.config.cosmic_conf.focus_follows_cursor_delay = new;
-                }
-            }
-            "edge_snap_threshold" => {
-                let new = get_config::<u32>(&config, "edge_snap_threshold");
-                if new != state.common.config.cosmic_conf.edge_snap_threshold {
-                    state.common.config.cosmic_conf.edge_snap_threshold = new;
-                }
-            }
-            "accessibility_zoom" => {
-                let new = get_config::<ZoomConfig>(&config, "accessibility_zoom");
-                if new != state.common.config.cosmic_conf.accessibility_zoom {
-                    state.common.config.cosmic_conf.accessibility_zoom = new;
-                    state.common.update_config();
-                }
-            }
-            "appearance_settings" => {
-                let new = get_config::<AppearanceConfig>(&config, "appearance_settings");
-                if new != state.common.config.cosmic_conf.appearance_settings {
-                    state.common.config.cosmic_conf.appearance_settings = new;
-                    state.common.update_config();
-                    for output in state.common.shell.read().outputs() {
-                        state.backend.schedule_render(output);
-                    }
-                }
-            }
-            _ => {}
+    // keyboard_config
+    if new.keyboard_config != old.keyboard_config {
+        let shell = state.common.shell.read();
+        let seat = shell.seats.last_active();
+        state.common.config.dynamic_conf.numlock_mut().last_state =
+            seat.get_keyboard().unwrap().modifier_state().num_lock;
+    }
+
+    // input
+    if new.input_default != old.input_default
+        || new.input_touchpad != old.input_touchpad
+        || new.input_touchpad_override != old.input_touchpad_override
+        || new.input_devices != old.input_devices
+    {
+        update_input(state);
+    }
+
+    // workspaces
+    if new.workspaces != old.workspaces {
+        state.common.update_config();
+    }
+
+    // autotile
+    if new.autotile != old.autotile {
+        let mut shell = state.common.shell.write();
+        let shell_ref = &mut *shell;
+        shell_ref.workspaces.update_autotile(
+            new.autotile,
+            &mut state.common.workspace_state.update(),
+            shell_ref.seats.iter(),
+        );
+    }
+
+    // autotile_behavior
+    if new.autotile_behavior != old.autotile_behavior {
+        let mut shell = state.common.shell.write();
+        let shell_ref = &mut *shell;
+        shell_ref.workspaces.update_autotile_behavior(
+            new.autotile_behavior,
+            &mut state.common.workspace_state.update(),
+            shell_ref.seats.iter(),
+        );
+    }
+
+    // active_hint
+    if new.active_hint != old.active_hint {
+        state.common.update_config();
+    }
+
+    // descale_xwayland
+    if new.descale_xwayland != old.descale_xwayland {
+        state.common.update_xwayland_settings();
+    }
+
+    // xwayland_eavesdropping
+    if new.xwayland_eavesdropping != old.xwayland_eavesdropping {
+        state
+            .common
+            .xwayland_reset_eavesdropping(SERIAL_COUNTER.next_serial());
+    }
+
+    // accessibility_zoom
+    if new.accessibility_zoom != old.accessibility_zoom {
+        state.common.update_config();
+    }
+
+    // appearance_settings
+    if new.appearance_settings != old.appearance_settings {
+        state.common.update_config();
+        for output in state.common.shell.read().outputs() {
+            state.backend.schedule_render(output);
         }
     }
 }

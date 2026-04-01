@@ -18,6 +18,8 @@ uuid = { version = "1", features = ["v7"] }
 anyhow = { version = "1.0.102", features = ["backtrace"] }
 bitflags = "2.11.0"
 calloop = { version = "0.14.4", features = ["executor"] }
+toml = "0.8"
+notify = "7"
 cosmic-comp-config = { path = "cosmic-comp-config", features = [
     "libdisplay-info",
     "output",

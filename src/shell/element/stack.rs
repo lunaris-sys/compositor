@@ -76,7 +76,7 @@ use std::{
     hash::Hash,
     sync::{
         Arc, LazyLock, Mutex,
-        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering},
     },
 };
 
@@ -89,6 +89,7 @@ use self::{
 };
 
 static SCROLLABLE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("scrollable"));
+static NEXT_STACK_ID: AtomicU32 = AtomicU32::new(1);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CosmicStack(pub(super) IcedElement<CosmicStackInternal>);
@@ -103,6 +104,8 @@ impl fmt::Debug for CosmicStack {
 
 #[derive(Debug)]
 pub struct CosmicStackInternal {
+    /// Unique identifier for this stack, used in the shell overlay protocol.
+    stack_id: u32,
     windows: Mutex<Vec<CosmicSurface>>,
     active: AtomicUsize,
     activated: AtomicBool,
@@ -157,9 +160,29 @@ impl CosmicStack {
             window.send_configure();
         }
 
+        let stack_id = NEXT_STACK_ID.fetch_add(1, Ordering::Relaxed);
+        // Notify shell about the initial tab list.
+        let initial_tabs: Vec<_> = windows
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (i as u32, w.title(), w.app_id()))
+            .collect();
+        handle.insert_idle(move |state| {
+            for (index, title, app_id) in initial_tabs {
+                state.common.shell_overlay_state.send_tab_added(
+                    stack_id,
+                    index,
+                    title,
+                    app_id,
+                    index == 0,
+                );
+            }
+        });
+
         let width = windows[0].geometry().size.w;
         CosmicStack(IcedElement::new(
             CosmicStackInternal {
+                stack_id,
                 windows: Mutex::new(windows),
                 active: AtomicUsize::new(0),
                 activated: AtomicBool::new(false),
@@ -192,7 +215,7 @@ impl CosmicStack {
         let window = window.into();
         window.try_force_undecorated(true);
         window.set_tiled(true);
-        self.0.with_program(|p| {
+        let tab_event = self.0.with_program(|p| {
             let last_mod_serial = moved_into.and_then(|seat| seat.last_modifier_change());
             let mut prev_idx = p.previous_index.lock().unwrap();
             if !prev_idx.is_some_and(|(serial, _)| Some(serial) == last_mod_serial) {
@@ -205,19 +228,28 @@ impl CosmicStack {
                 window.set_geometry(geo, TAB_HEIGHT as u32);
             }
             window.send_configure();
-            if let Some(idx) = idx {
-                p.windows.lock().unwrap().insert(idx, window);
+            let (final_idx, is_active) = if let Some(idx) = idx {
+                p.windows.lock().unwrap().insert(idx, window.clone());
                 let old_idx = p.active.swap(idx, Ordering::SeqCst);
                 if old_idx == idx {
                     p.reenter.store(true, Ordering::SeqCst);
                     p.previous_keyboard.store(old_idx, Ordering::SeqCst);
                 }
+                (idx, true)
             } else {
                 let mut windows = p.windows.lock().unwrap();
-                windows.push(window);
-                p.active.store(windows.len() - 1, Ordering::SeqCst);
-            }
+                windows.push(window.clone());
+                let new_idx = windows.len() - 1;
+                p.active.store(new_idx, Ordering::SeqCst);
+                (new_idx, true)
+            };
             p.scroll_to_focus.store(true, Ordering::SeqCst);
+            (p.stack_id, final_idx as u32, window.title(), window.app_id(), is_active)
+        });
+        // Notify shell about the new tab.
+        let (stack_id, index, title, app_id, active) = tab_event;
+        self.0.loop_handle().insert_idle(move |state| {
+            state.common.shell_overlay_state.send_tab_added(stack_id, index, title, app_id, active);
         });
         self.0
             .resize(Size::from((self.active().geometry().size.w, TAB_HEIGHT)));
@@ -225,18 +257,18 @@ impl CosmicStack {
     }
 
     pub fn remove_window(&self, window: &CosmicSurface) {
-        self.0.with_program(|p| {
+        let tab_event = self.0.with_program(|p| {
             let mut windows = p.windows.lock().unwrap();
             if windows.len() == 1 {
                 p.override_alive.store(false, Ordering::SeqCst);
                 let window = windows.first().unwrap();
                 window.try_force_undecorated(false);
                 window.set_tiled(false);
-                return;
+                return None;
             }
 
             let Some(idx) = windows.iter().position(|w| w == window) else {
-                return;
+                return None;
             };
             if idx == p.active.load(Ordering::SeqCst) {
                 p.reenter.store(true, Ordering::SeqCst);
@@ -246,24 +278,30 @@ impl CosmicStack {
             window.set_tiled(false);
 
             p.active.fetch_min(windows.len() - 1, Ordering::SeqCst);
+            Some((p.stack_id, idx as u32))
         });
+        if let Some((stack_id, index)) = tab_event {
+            self.0.loop_handle().insert_idle(move |state| {
+                state.common.shell_overlay_state.send_tab_removed(stack_id, index);
+            });
+        }
         self.0
             .resize(Size::from((self.active().geometry().size.w, TAB_HEIGHT)));
         self.0.force_redraw()
     }
 
     pub fn remove_idx(&self, idx: usize) -> Option<CosmicSurface> {
-        let window = self.0.with_program(|p| {
+        let (window, tab_event) = self.0.with_program(|p| {
             let mut windows = p.windows.lock().unwrap();
             if windows.len() == 1 {
                 p.override_alive.store(false, Ordering::SeqCst);
                 let window = windows.first().unwrap();
                 window.try_force_undecorated(false);
                 window.set_tiled(false);
-                return Some(window.clone());
+                return (Some(window.clone()), None);
             }
             if windows.len() <= idx {
-                return None;
+                return (None, None);
             }
             if idx == p.active.load(Ordering::SeqCst) {
                 p.reenter.store(true, Ordering::SeqCst);
@@ -274,12 +312,22 @@ impl CosmicStack {
 
             p.active.fetch_min(windows.len() - 1, Ordering::SeqCst);
 
-            Some(window)
+            (Some(window), Some((p.stack_id, idx as u32)))
         });
+        if let Some((stack_id, index)) = tab_event {
+            self.0.loop_handle().insert_idle(move |state| {
+                state.common.shell_overlay_state.send_tab_removed(stack_id, index);
+            });
+        }
         self.0
             .resize(Size::from((self.active().geometry().size.w, TAB_HEIGHT)));
         self.0.force_redraw();
         window
+    }
+
+    /// Returns the unique stack identifier used in the shell overlay protocol.
+    pub fn stack_id(&self) -> u32 {
+        self.0.with_program(|p| p.stack_id)
     }
 
     pub fn len(&self) -> usize {
@@ -479,14 +527,21 @@ impl CosmicStack {
     where
         CosmicSurface: PartialEq<S>,
     {
-        self.0.with_program(|p| {
+        let tab_event = self.0.with_program(|p| {
             if let Some(val) = p.windows.lock().unwrap().iter().position(|w| w == window) {
                 let old = p.active.swap(val, Ordering::SeqCst);
                 if old != val {
                     p.previous_keyboard.store(old, Ordering::SeqCst);
+                    return Some((p.stack_id, val as u32));
                 }
             }
+            None
         });
+        if let Some((stack_id, index)) = tab_event {
+            self.0.loop_handle().insert_idle(move |state| {
+                state.common.shell_overlay_state.send_tab_activated(stack_id, index);
+            });
+        }
         self.0
             .resize(Size::from((self.active().geometry().size.w, TAB_HEIGHT)));
         self.0.force_redraw()

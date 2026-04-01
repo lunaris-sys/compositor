@@ -51,6 +51,28 @@ impl ShellOverlayHandler for State {
         self.common.pending_menu_callbacks.remove(&menu_id);
         unset_overlay_grab(self, menu_id);
     }
+
+    fn tab_activate(&mut self, stack_id: u32, index: u32) {
+        let found = {
+            let shell = self.common.shell.read();
+            shell.mapped().find_map(|mapped| {
+                let stack = mapped.stack_ref()?;
+                if stack.stack_id() != stack_id {
+                    return None;
+                }
+                let surface = stack.surfaces().nth(index as usize)?;
+                Some((stack.clone(), surface))
+            })
+        };
+        if let Some((stack, surface)) = found {
+            stack.set_active(&surface);
+        } else {
+            tracing::warn!(
+                "shell_overlay: tab_activate for unknown stack_id {}",
+                stack_id
+            );
+        }
+    }
 }
 
 /// Release the pointer grab held by the `MenuGrab` that owns `menu_id`.

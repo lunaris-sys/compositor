@@ -89,6 +89,72 @@
       <arg name="menu_id" type="uint" summary="menu instance id"/>
     </request>
 
+    <!-- ===== Tab Bar ===== -->
+
+    <event name="tab_bar_show">
+      <description summary="a window stack tab bar should be displayed">
+        Sent when a window stack becomes visible or changes geometry.
+        The shell should render a tab bar at the given position.
+      </description>
+      <arg name="stack_id" type="uint" summary="unique stack instance id"/>
+      <arg name="x" type="int" summary="x position in compositor global coordinates"/>
+      <arg name="y" type="int" summary="y position in compositor global coordinates"/>
+      <arg name="width" type="int" summary="tab bar width in logical pixels"/>
+      <arg name="height" type="int" summary="tab bar height in logical pixels"/>
+    </event>
+
+    <event name="tab_bar_hide">
+      <description summary="a window stack tab bar should be hidden">
+        Sent when a window stack is destroyed or no longer visible.
+      </description>
+      <arg name="stack_id" type="uint" summary="stack instance id"/>
+    </event>
+
+    <event name="tab_added">
+      <description summary="a tab was added to a stack">
+        Sent when a window is added to a stack. index is the position in the
+        tab list. active is 1 if this tab is now the active tab.
+      </description>
+      <arg name="stack_id" type="uint" summary="stack instance id"/>
+      <arg name="index" type="uint" summary="position in tab list"/>
+      <arg name="title" type="string" summary="window title"/>
+      <arg name="app_id" type="string" summary="application id"/>
+      <arg name="active" type="uint" summary="1 if this tab is now active"/>
+    </event>
+
+    <event name="tab_removed">
+      <description summary="a tab was removed from a stack">
+        Sent when a window is removed from a stack.
+      </description>
+      <arg name="stack_id" type="uint" summary="stack instance id"/>
+      <arg name="index" type="uint" summary="index of the removed tab"/>
+    </event>
+
+    <event name="tab_activated">
+      <description summary="the active tab in a stack changed">
+        Sent when a different tab becomes active in a stack.
+      </description>
+      <arg name="stack_id" type="uint" summary="stack instance id"/>
+      <arg name="index" type="uint" summary="index of the newly active tab"/>
+    </event>
+
+    <event name="tab_title_changed">
+      <description summary="a tab title was updated">
+        Sent when the title of a window in a stack changes.
+      </description>
+      <arg name="stack_id" type="uint" summary="stack instance id"/>
+      <arg name="index" type="uint" summary="index of the tab"/>
+      <arg name="title" type="string" summary="new window title"/>
+    </event>
+
+    <request name="tab_activate">
+      <description summary="user activated a tab">
+        Sent by the shell when the user clicks a tab in the tab bar.
+      </description>
+      <arg name="stack_id" type="uint" summary="stack instance id"/>
+      <arg name="index" type="uint" summary="index of the tab to activate"/>
+    </request>
+
     <!-- ===== Window Actions Enum ===== -->
 
     <enum name="window_action">

@@ -31,6 +31,14 @@ use smithay::{
 };
 use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
+/// Cached title stored in a `CosmicSurface`'s user_data for change detection.
+struct CachedTitle(Mutex<String>);
+impl CachedTitle {
+    fn new(title: &str) -> Self {
+        CachedTitle(Mutex::new(title.to_string()))
+    }
+}
+
 fn toplevel_ensure_initial_configure(
     toplevel: &ToplevelSurface,
     size: Option<Size<i32, Logical>>,
@@ -360,6 +368,36 @@ impl CompositorHandler for State {
                     .is_some()
             })
             .cloned();
+
+        // Detect title changes for stacked windows and emit protocol events.
+        if let Some(element) = shell.element_for_surface(surface).cloned() {
+            if let Some(stack) = element.stack_ref() {
+                for (i, s) in stack.surfaces().enumerate() {
+                    if s.wl_surface().as_deref() == Some(surface) {
+                        let current_title = s.title();
+                        let cached = s.user_data().get::<CachedTitle>();
+                        let changed = cached
+                            .map(|c| c.0.lock().unwrap().as_str() != current_title)
+                            .unwrap_or(true);
+                        if changed {
+                            let stack_id = stack.stack_id();
+                            let title = current_title.clone();
+                            s.user_data().insert_if_missing(|| CachedTitle::new(""));
+                            *s.user_data()
+                                .get::<CachedTitle>()
+                                .unwrap()
+                                .0
+                                .lock()
+                                .unwrap() = current_title;
+                            self.common
+                                .shell_overlay_state
+                                .send_tab_title_changed(stack_id, i as u32, title);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
 
         if let Some(output) = layer_output {
             // Smithay returns None for effective_exclusive_edge when all 4

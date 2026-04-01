@@ -159,6 +159,59 @@ impl ShellOverlayState {
     }
 }
 
+// ===== Tab bar methods =====
+
+impl ShellOverlayState {
+    /// Notify connected shells that a tab bar should be shown at the given position.
+    pub fn send_tab_bar_show(&self, stack_id: u32, x: i32, y: i32, width: i32, height: i32) {
+        for instance in &self.instances {
+            instance.tab_bar_show(stack_id, x, y, width, height);
+        }
+    }
+
+    /// Notify connected shells that a tab bar should be hidden.
+    pub fn send_tab_bar_hide(&self, stack_id: u32) {
+        for instance in &self.instances {
+            instance.tab_bar_hide(stack_id);
+        }
+    }
+
+    /// Notify connected shells that a tab was added to a stack.
+    pub fn send_tab_added(
+        &self,
+        stack_id: u32,
+        index: u32,
+        title: String,
+        app_id: String,
+        active: bool,
+    ) {
+        for instance in &self.instances {
+            instance.tab_added(stack_id, index, title.clone(), app_id.clone(), active as u32);
+        }
+    }
+
+    /// Notify connected shells that a tab was removed from a stack.
+    pub fn send_tab_removed(&self, stack_id: u32, index: u32) {
+        for instance in &self.instances {
+            instance.tab_removed(stack_id, index);
+        }
+    }
+
+    /// Notify connected shells that the active tab changed.
+    pub fn send_tab_activated(&self, stack_id: u32, index: u32) {
+        for instance in &self.instances {
+            instance.tab_activated(stack_id, index);
+        }
+    }
+
+    /// Notify connected shells that a tab title changed.
+    pub fn send_tab_title_changed(&self, stack_id: u32, index: u32, title: String) {
+        for instance in &self.instances {
+            instance.tab_title_changed(stack_id, index, title.clone());
+        }
+    }
+}
+
 // ===== Menu item types =====
 
 /// A window management action that can appear as a context menu entry.
@@ -266,6 +319,9 @@ pub trait ShellOverlayHandler {
 
     /// Called when the shell dismisses a context menu without activating an item.
     fn context_menu_dismiss(&mut self, menu_id: u32);
+
+    /// Called when the shell activates a tab in a stack.
+    fn tab_activate(&mut self, stack_id: u32, index: u32);
 }
 
 // ===== GlobalDispatch =====
@@ -311,13 +367,15 @@ where
         _data_init: &mut DataInit<'_, D>,
     ) {
         match request {
-           OverlayRequest::Activate { menu_id, index } => {
+            OverlayRequest::Activate { menu_id, index } => {
                 state.context_menu_activate(menu_id, index);
             }
             OverlayRequest::Dismiss { menu_id } => {
                 state.context_menu_dismiss(menu_id);
             }
-            _ => {}
+            OverlayRequest::TabActivate { stack_id, index } => {
+                state.tab_activate(stack_id, index);
+            }
         }
     }
 

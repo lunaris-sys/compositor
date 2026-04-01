@@ -26,11 +26,9 @@ use crate::{
 use calloop::LoopHandle;
 use cosmic::{
     Apply, Element as CosmicElement, Theme,
-    iced::{Alignment, id::Id, widget as iced_widget},
-    iced_core::{Background, Border, Color, Length, border::Radius},
+    iced::widget as iced_widget,
+    iced_core::Length,
     iced_runtime::Task,
-    iced_widget::scrollable::AbsoluteOffset,
-    theme, widget as cosmic_widget,
 };
 use cosmic_comp_config::AppearanceConfig;
 use cosmic_settings_config::shortcuts;
@@ -75,20 +73,12 @@ use std::{
     fmt,
     hash::Hash,
     sync::{
-        Arc, LazyLock, Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering},
     },
 };
 
-mod tab;
-mod tabs;
 
-use self::{
-    tab::{Tab, TabMessage},
-    tabs::Tabs,
-};
-
-static SCROLLABLE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("scrollable"));
 static NEXT_STACK_ID: AtomicU32 = AtomicU32::new(1);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1046,41 +1036,6 @@ pub enum Message {
     PotentialTabDragStart(usize),
     Activate(usize),
     Close(usize),
-    ScrollForward,
-    ScrollBack,
-    Scrolled,
-}
-
-impl TabMessage for Message {
-    fn activate(idx: usize) -> Self {
-        Message::Activate(idx)
-    }
-
-    fn scroll_back() -> Self {
-        Message::ScrollBack
-    }
-
-    fn scroll_further() -> Self {
-        Message::ScrollForward
-    }
-
-    fn populate_scroll(&mut self, mut current_offset: AbsoluteOffset) -> Option<AbsoluteOffset> {
-        match self {
-            Message::ScrollBack => Some({
-                current_offset.x -= 10.;
-                current_offset
-            }),
-            Message::ScrollForward => Some({
-                current_offset.x += 10.;
-                current_offset
-            }),
-            _ => None,
-        }
-    }
-
-    fn scrolled() -> Self {
-        Message::Scrolled
-    }
 }
 
 impl Program for CosmicStackInternal {
@@ -1144,9 +1099,6 @@ impl Program for CosmicStackInternal {
                 if let Some(val) = self.windows.lock().unwrap().get(idx) {
                     val.close()
                 }
-            }
-            Message::Scrolled => {
-                self.scroll_to_focus.store(false, Ordering::SeqCst);
             }
             Message::Menu => {
                 if let Some((seat, serial)) = last_seat.cloned() {
@@ -1303,119 +1255,15 @@ impl Program for CosmicStackInternal {
 pub struct DefaultDecorations;
 
 impl Decorations<CosmicStackInternal, Message> for DefaultDecorations {
-    fn view(&self, stack: &CosmicStackInternal) -> cosmic::Element<'_, Message> {
-        let windows = stack.windows.lock().unwrap();
-        if stack.geometry.lock().unwrap().is_none() {
-            return iced_widget::row(Vec::new()).into();
-        };
-        let active = stack.active.load(Ordering::SeqCst);
-        let group_focused = stack.group_focused.load(Ordering::SeqCst);
-
-        let elements = vec![
-            cosmic_widget::icon::from_name("window-stack-symbolic")
-                .size(16)
-                .prefer_svg(true)
-                .icon()
-                .class(if group_focused {
-                    theme::Svg::custom(|theme| iced_widget::svg::Style {
-                        color: Some(if theme.cosmic().is_dark {
-                            Color::BLACK
-                        } else {
-                            Color::WHITE
-                        }),
-                    })
-                } else {
-                    theme::Svg::Default
-                })
-                .apply(iced_widget::container)
-                .padding([4, 24])
-                .align_y(Alignment::Center)
-                .apply(iced_widget::mouse_area)
-                .on_press(Message::DragStart)
-                .on_right_press(Message::Menu)
-                .into(),
-            CosmicElement::new(
-                Tabs::new(
-                    windows.iter().enumerate().map(|(i, w)| {
-                        let user_data = w.user_data();
-                        user_data.insert_if_missing(Id::unique);
-                        Tab::new(
-                            w.title(),
-                            w.app_id(),
-                            user_data.get::<Id>().unwrap().clone(),
-                        )
-                        .on_press(Message::PotentialTabDragStart(i))
-                        .on_right_click(Message::TabMenu(i))
-                        .on_close(Message::Close(i))
-                    }),
-                    active,
-                    windows[active].is_activated(false),
-                    group_focused,
-                )
-                .id(SCROLLABLE_ID.clone())
-                .force_visible(
-                    stack
-                        .scroll_to_focus
-                        .load(Ordering::SeqCst)
-                        .then_some(active),
-                )
-                .height(Length::Fill)
-                .width(Length::Fill),
-            ),
-            iced_widget::space::horizontal()
-                .width(Length::Fixed(0.0))
-                .apply(iced_widget::container)
-                .padding([64, 24])
-                .apply(iced_widget::mouse_area)
-                .on_press(Message::DragStart)
-                .on_right_press(Message::Menu)
-                .into(),
-        ];
-
-        let radius = if windows[active].is_maximized(false)
-            || (stack.tiled.load(Ordering::Acquire)
-                && !stack.appearance_conf.lock().unwrap().clip_tiled_windows)
-        {
-            Radius::from(0.0)
-        } else {
-            let radii = stack
-                .theme
-                .lock()
-                .unwrap()
-                .cosmic()
-                .radius_s()
-                .map(|x| if x < 4.0 { x } else { x + 4.0 });
-            Radius::from([radii[0], radii[1], 0., 0.])
-        };
-        let group_focused = stack.group_focused.load(Ordering::SeqCst);
-
-        iced_widget::row(elements)
-            .height(TAB_HEIGHT as u16)
+    fn view(&self, _stack: &CosmicStackInternal) -> cosmic::Element<'_, Message> {
+        // Tab rendering is delegated to desktop-shell via the shell overlay
+        // protocol. This minimal view preserves DragStart and Menu input.
+        iced_widget::space::horizontal()
             .width(Length::Fill)
-            .apply(iced_widget::container)
-            .align_y(Alignment::Center)
-            .class(theme::Container::custom(move |theme| {
-                let cosmic_theme = theme.cosmic();
-
-                let background = if group_focused {
-                    cosmic_theme.accent_color()
-                } else {
-                    cosmic_theme.primary_container_color()
-                };
-
-                iced_widget::container::Style {
-                    snap: true,
-                    icon_color: Some(cosmic_theme.background.on.into()),
-                    text_color: Some(cosmic_theme.background.on.into()),
-                    background: Some(Background::Color(background.into())),
-                    border: Border {
-                        radius,
-                        width: 0.0,
-                        color: Color::TRANSPARENT,
-                    },
-                    shadow: Default::default(),
-                }
-            }))
+            .height(Length::Fixed(TAB_HEIGHT as f32))
+            .apply(iced_widget::mouse_area)
+            .on_press(Message::DragStart)
+            .on_right_press(Message::Menu)
             .into()
     }
 }

@@ -454,6 +454,13 @@ impl MoveGrab {
 
             let indicator_location = shell.stacking_indicator(&current_output, self.previous);
             if indicator_location.is_some() != grab_state.stacking_indicator.is_some() {
+                if indicator_location.is_some() {
+                    state.common.shell_overlay_state.send_indicator_show(
+                        1, 0, 0, String::new(), String::new(),
+                    );
+                } else {
+                    state.common.shell_overlay_state.send_indicator_hide(1);
+                }
                 grab_state.stacking_indicator = indicator_location.map(|geo| {
                     let element = stack_hover(
                         state.common.event_loop_handle.clone(),
@@ -642,7 +649,17 @@ impl PointerGrab<State> for MoveGrab {
         }
     }
 
-    fn unset(&mut self, _data: &mut State) {}
+    fn unset(&mut self, data: &mut State) {
+        let has_indicator = self
+            .seat
+            .user_data()
+            .get::<SeatMoveGrabState>()
+            .and_then(|s| s.lock().unwrap().as_ref().map(|g| g.stacking_indicator.is_some()))
+            .unwrap_or(false);
+        if has_indicator {
+            data.common.shell_overlay_state.send_indicator_hide(1);
+        }
+    }
 }
 
 impl TouchGrab<State> for MoveGrab {
@@ -721,7 +738,17 @@ impl TouchGrab<State> for MoveGrab {
         }
     }
 
-    fn unset(&mut self, _data: &mut State) {}
+    fn unset(&mut self, data: &mut State) {
+        let has_indicator = self
+            .seat
+            .user_data()
+            .get::<SeatMoveGrabState>()
+            .and_then(|s| s.lock().unwrap().as_ref().map(|g| g.stacking_indicator.is_some()))
+            .unwrap_or(false);
+        if has_indicator {
+            data.common.shell_overlay_state.send_indicator_hide(1);
+        }
+    }
 }
 
 impl MoveGrab {

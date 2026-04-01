@@ -212,6 +212,35 @@ impl ShellOverlayState {
     }
 }
 
+// ===== Indicator methods =====
+
+impl ShellOverlayState {
+    /// Notify connected shells that an indicator should be shown or updated.
+    pub fn send_indicator_show(
+        &self,
+        kind: u32,
+        edges: u32,
+        direction: u32,
+        shortcut1: String,
+        shortcut2: String,
+    ) {
+        let kind_enum = lunaris_shell_overlay_v1::IndicatorKind::try_from(kind);
+        let Ok(kind_enum) = kind_enum else { return };
+        for instance in &self.instances {
+            instance.indicator_show(kind_enum, edges, direction, shortcut1.clone(), shortcut2.clone());
+        }
+    }
+
+    /// Notify connected shells that an indicator should be hidden.
+    pub fn send_indicator_hide(&self, kind: u32) {
+        let kind_enum = lunaris_shell_overlay_v1::IndicatorKind::try_from(kind);
+        let Ok(kind_enum) = kind_enum else { return };
+        for instance in &self.instances {
+            instance.indicator_hide(kind_enum);
+        }
+    }
+}
+
 // ===== Menu item types =====
 
 /// A window management action that can appear as a context menu entry.

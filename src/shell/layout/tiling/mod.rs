@@ -5545,6 +5545,18 @@ where
                             }
                         }) {
                             resize.force_update();
+                            let edge_bits = possible_edges.bits();
+                            let dir_val: u32 = resize.with_program(|internal| {
+                                match internal.direction {
+                                    ResizeDirection::Outwards => 1,
+                                    ResizeDirection::Inwards => 2,
+                                }
+                            });
+                            resize.loop_handle().insert_idle(move |state| {
+                                state.common.shell_overlay_state.send_indicator_show(
+                                    3, edge_bits, dir_val, String::new(), String::new(),
+                                );
+                            });
                         }
                         resize_elements = Some(
                             resize

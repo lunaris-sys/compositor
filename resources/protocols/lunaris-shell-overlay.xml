@@ -155,6 +155,35 @@
       <arg name="index" type="uint" summary="index of the tab to activate"/>
     </request>
 
+    <!-- ===== Indicators ===== -->
+
+    <enum name="indicator_kind">
+      <description summary="visual indicator types"/>
+      <entry name="stack_hover" value="1" summary="drop target for window stacking"/>
+      <entry name="swap"        value="2" summary="swap mode active"/>
+      <entry name="resize"      value="3" summary="keyboard resize mode active"/>
+    </enum>
+
+    <event name="indicator_show">
+      <description summary="show or update a visual indicator">
+        Sent when the compositor enters a mode that requires a visual indicator.
+        Desktop-shell positions the indicator itself based on kind.
+        edges and direction are only meaningful for kind=resize.
+      </description>
+      <arg name="kind" type="uint" enum="indicator_kind" summary="indicator type"/>
+      <arg name="edges" type="uint" summary="active resize edges bitflags (1=top 2=bottom 4=left 8=right)"/>
+      <arg name="direction" type="uint" summary="resize direction (0=none 1=outwards 2=inwards)"/>
+      <arg name="shortcut1" type="string" summary="keyboard shortcut hint 1"/>
+      <arg name="shortcut2" type="string" summary="keyboard shortcut hint 2"/>
+    </event>
+
+    <event name="indicator_hide">
+      <description summary="hide a visual indicator">
+        Sent when the compositor leaves the mode that required the indicator.
+      </description>
+      <arg name="kind" type="uint" enum="indicator_kind" summary="indicator type to hide"/>
+    </event>
+
     <!-- ===== Window Actions Enum ===== -->
 
     <enum name="window_action">

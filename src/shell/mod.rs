@@ -287,6 +287,8 @@ pub struct Shell {
         Output,
     )>,
     resize_indicator: Option<ResizeIndicator>,
+    /// Indicator kinds to hide, drained by `Common::refresh()`.
+    pub(crate) pending_indicator_hides: Vec<u32>,
     zoom_state: Option<ZoomState>,
     appearance_conf: AppearanceConfig,
     tiling_exceptions: TilingExceptions,
@@ -1493,10 +1495,16 @@ impl Common {
     pub fn refresh(&mut self) {
         self.xdg_activation_state
             .retain_tokens(|_, data| data.timestamp.elapsed() < ACTIVATION_TOKEN_EXPIRE_TIME);
-        self.shell.write().refresh(
-            &self.xdg_activation_state,
-            &mut self.workspace_state.update(),
-        );
+        {
+            let mut shell = self.shell.write();
+            shell.refresh(
+                &self.xdg_activation_state,
+                &mut self.workspace_state.update(),
+            );
+            for kind in shell.pending_indicator_hides.drain(..) {
+                self.shell_overlay_state.send_indicator_hide(kind);
+            }
+        }
         self.popups.cleanup();
         self.toplevel_info_state.refresh(&self.workspace_state);
         self.refresh_idle_inhibit();
@@ -1596,6 +1604,7 @@ impl Shell {
             resize_mode: ResizeMode::None,
             resize_state: None,
             resize_indicator: None,
+            pending_indicator_hides: Vec::new(),
             appearance_conf: config.cosmic_conf.appearance_settings,
             zoom_state: None,
             tiling_exceptions,
@@ -2194,7 +2203,12 @@ impl Shell {
                 OverviewMode::Started(_, _) | OverviewMode::Active(_)
             ) {
                 if matches!(trigger, Trigger::KeyboardSwap(_, _)) {
-                    self.swap_indicator = Some(swap_indicator(evlh, self.theme.clone()));
+                    self.swap_indicator = Some(swap_indicator(evlh.clone(), self.theme.clone()));
+                    evlh.insert_idle(|state| {
+                        state.common.shell_overlay_state.send_indicator_show(
+                            2, 0, 0, String::new(), String::new(),
+                        );
+                    });
                 }
                 self.overview_mode = OverviewMode::Started(trigger, Instant::now());
             }
@@ -2246,6 +2260,34 @@ impl Shell {
                 *old_direction = direction;
             } else {
                 self.resize_mode = ResizeMode::Started(pattern, Instant::now(), direction);
+            }
+            {
+                use cosmic_settings_config::shortcuts::action::Action;
+                let dir_val: u32 = match direction {
+                    ResizeDirection::Outwards => 1,
+                    ResizeDirection::Inwards => 2,
+                };
+                let s1 = config
+                    .shortcuts
+                    .iter()
+                    .find_map(|(pattern, action)| {
+                        (*action == Action::Resizing(ResizeDirection::Outwards))
+                            .then_some(format!("{:?}: ", pattern))
+                    })
+                    .unwrap_or_default();
+                let s2 = config
+                    .shortcuts
+                    .iter()
+                    .find_map(|(pattern, action)| {
+                        (*action == Action::Resizing(ResizeDirection::Inwards))
+                            .then_some(format!("{:?}: ", pattern))
+                    })
+                    .unwrap_or_default();
+                evlh.clone().insert_idle(move |state| {
+                    state.common.shell_overlay_state.send_indicator_show(
+                        3, 0x0F, dir_val, s1, s2,
+                    );
+                });
             }
             self.resize_indicator = Some(resize_indicator(
                 direction,
@@ -2417,6 +2459,9 @@ impl Shell {
                 if Instant::now().duration_since(*timestamp) > ANIMATION_DURATION =>
             {
                 self.overview_mode = OverviewMode::None;
+                if self.swap_indicator.is_some() {
+                    self.pending_indicator_hides.push(2);
+                }
                 self.swap_indicator = None;
             }
             _ => {}
@@ -2432,6 +2477,9 @@ impl Shell {
                 if Instant::now().duration_since(*timestamp) > ANIMATION_DURATION =>
             {
                 self.resize_mode = ResizeMode::None;
+                if self.resize_indicator.is_some() {
+                    self.pending_indicator_hides.push(3);
+                }
                 self.resize_indicator = None;
             }
             _ => {}

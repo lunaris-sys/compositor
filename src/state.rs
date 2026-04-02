@@ -248,6 +248,7 @@ pub struct Common {
 
     pub kiosk_child: Option<Child>,
     pub theme: cosmic::Theme,
+    pub lunaris_theme: lunaris_theme::LunarisTheme,
 
     // wayland state
     pub compositor_state: CompositorState,
@@ -763,6 +764,7 @@ impl State {
 
                 kiosk_child: None,
                 theme: cosmic::theme::system_preference(),
+                lunaris_theme: lunaris_theme::LunarisTheme::load(),
 
                 compositor_state,
                 corner_radius_state,

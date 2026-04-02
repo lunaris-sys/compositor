@@ -390,9 +390,9 @@ impl CosmicWindow {
             if !should_draw_shadow {
                 return None;
             }
-            let mut radii = theme
-                .cosmic()
-                .radius_s()
+            let lt = crate::theme::lunaris_theme();
+            let mut radii = lt
+                .radius_s
                 .map(|x| if x < 4.0 { x } else { x + 4.0 })
                 .map(|x| (x * scale as f32).round() as u8);
             if has_ssd && !clip {
@@ -427,7 +427,7 @@ impl CosmicWindow {
                     radii,
                     if activated { alpha } else { alpha * 0.75 },
                     output_scale.x,
-                    theme.cosmic().is_dark,
+                    lt.is_dark,
                 ))
                 .into(),
             )
@@ -453,11 +453,8 @@ impl CosmicWindow {
                 p.has_ssd(false),
                 p.is_tiled(),
                 p.window.is_maximized(false),
-                p.theme
-                    .lock()
-                    .unwrap()
-                    .cosmic()
-                    .radius_s()
+                crate::theme::lunaris_theme()
+                    .radius_s
                     .map(|x| if x < 4.0 { x } else { x + 4.0 })
                     .map(|x| x.round() as u8),
                 *p.appearance_conf.lock().unwrap(),
@@ -633,11 +630,8 @@ impl CosmicWindow {
                 (!is_tiled || appearance.clip_tiled_windows) && !p.window.is_maximized(false);
             let radii = if round {
                 {
-                    p.theme
-                        .lock()
-                        .unwrap()
-                        .cosmic()
-                        .radius_s()
+                    crate::theme::lunaris_theme()
+                        .radius_s
                         .map(|x| if x < 4.0 { x } else { x + 4.0 })
                         .map(|x| x.round() as u8)
                 }
@@ -799,9 +793,10 @@ impl Program for CosmicWindowInternal {
         Task::none()
     }
 
-    fn background_color(&self, theme: &cosmic::Theme) -> Color {
+    fn background_color(&self, _theme: &cosmic::Theme) -> Color {
         if self.window.is_maximized(false) {
-            theme.cosmic().background.base.into()
+            let [r, g, b, a] = crate::theme::lunaris_theme().bg_app;
+            Color { r, g, b, a }
         } else {
             Color::TRANSPARENT
         }

@@ -471,6 +471,7 @@ pub fn cursor_elements<'a, 'frame, R>(
     seats: impl Iterator<Item = &'a Seat<State>>,
     zoom_state: Option<&ZoomState>,
     theme: &Theme,
+    lt: &lunaris_theme::LunarisTheme,
     now: Time<Monotonic>,
     output: &Output,
     mode: CursorMode,
@@ -549,7 +550,7 @@ where
             .lock()
             .unwrap()
             .as_ref()
-            .map(|state| state.render::<CosmicMappedRenderElement<R>, R>(renderer, output, theme))
+            .map(|state| state.render::<CosmicMappedRenderElement<R>, R>(renderer, output, theme, lt))
         {
             elements.extend(grab_elements.into_iter().map(|elem| {
                 CosmicElement::MoveGrab(RescaleRenderElement::from_element(
@@ -734,16 +735,20 @@ where
     // that is prone to deadlock with the main-thread on some grabs.
     std::mem::drop(shell_ref);
 
-    elements.extend(cursor_elements(
-        renderer,
-        seats.iter(),
-        zoom_level,
-        &theme,
-        now,
-        output,
-        cursor_mode,
-        element_filter == ElementFilter::ExcludeWorkspaceOverview,
-    ));
+    {
+        let lt = &shell.read().lunaris_theme.clone();
+        elements.extend(cursor_elements(
+            renderer,
+            seats.iter(),
+            zoom_level,
+            &theme,
+            lt,
+            now,
+            output,
+            cursor_mode,
+            element_filter == ElementFilter::ExcludeWorkspaceOverview,
+        ));
+    }
 
     let shell = shell.read();
     let overview = shell.overview_mode();
@@ -782,7 +787,7 @@ where
         .ok_or(OutputNoMode)?;
     let is_active_space = workspace.output == focused_output;
     let active_hint = if shell.active_hint {
-        theme.cosmic().active_hint as u8
+        shell.lunaris_theme.active_hint as u8
     } else {
         0
     };

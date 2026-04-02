@@ -730,10 +730,9 @@ impl CosmicStack {
             if tiled && !appearance.shadow_tiled_windows {
                 return None;
             }
+            let lt = crate::theme::lunaris_theme();
             let radii = if round {
-                theme
-                    .cosmic()
-                    .radius_s()
+                lt.radius_s
                     .map(|x| if x < 4.0 { x } else { x + 4.0 })
                     .map(|x| (x * scale as f32).round() as u8)
             } else {
@@ -760,7 +759,7 @@ impl CosmicStack {
                     radii,
                     if activated { alpha } else { alpha * 0.75 },
                     output_scale.x,
-                    theme.cosmic().is_dark,
+                    lt.is_dark,
                 ))
                 .into(),
             )
@@ -807,11 +806,10 @@ impl CosmicStack {
             let tiled = p.tiled.load(Ordering::Acquire);
             let maximized = windows[active].is_maximized(false);
 
+            let lt = crate::theme::lunaris_theme();
             let round = (appearance.clip_tiled_windows || !tiled) && !maximized;
             let radii = round.then(|| {
-                theme
-                    .cosmic()
-                    .radius_s()
+                lt.radius_s
                     .map(|x| if x < 4.0 { x } else { x + 4.0 })
                     .map(|x| x.round() as u8)
             });
@@ -827,7 +825,7 @@ impl CosmicStack {
                 CosmicMappedKey(CosmicMappedKeyInner::Stack(Arc::downgrade(&self.0.0)));
 
             let border = (!maximized).then(|| {
-                let (r, g, b, a) = theme.cosmic().bg_divider().into_components();
+                let [r, g, b, a] = lt.border;
                 CosmicStackRenderElement::Border(IndicatorShader::element(
                     renderer,
                     Key::Window(Usage::Border, window_key.clone()),
@@ -996,12 +994,8 @@ impl CosmicStack {
             let maximized = active_window.is_maximized(false);
 
             let round = (appearance.clip_tiled_windows || !is_tiled) && !maximized;
-            let radii = p
-                .theme
-                .lock()
-                .unwrap()
-                .cosmic()
-                .radius_s()
+            let radii = crate::theme::lunaris_theme()
+                .radius_s
                 .map(|x| if x < 4.0 { x } else { x + 4.0 })
                 .map(|val| val.round() as u8);
 
@@ -1228,7 +1222,7 @@ impl Program for CosmicStackInternal {
             );
 
             let mut paint = tiny_skia::Paint::default();
-            let (b, g, r, a) = theme.cosmic().accent_color().into_components();
+            let [r, g, b, a] = crate::theme::lunaris_theme().accent;
             paint.set_color(tiny_skia::Color::from_rgba(r, g, b, a).unwrap());
 
             for rect in damage {

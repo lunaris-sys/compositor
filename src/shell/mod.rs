@@ -275,6 +275,7 @@ pub struct Shell {
 
     theme: cosmic::Theme,
     pub active_hint: bool,
+    pub lunaris_theme: lunaris_theme::LunarisTheme,
     overview_mode: OverviewMode,
     swap_indicator: Option<SwapIndicator>,
     resize_mode: ResizeMode,
@@ -1465,6 +1466,7 @@ impl Common {
         let mut shell = self.shell.write();
         let shell_ref = &mut *shell;
         shell_ref.active_hint = self.config.cosmic_conf.active_hint;
+        shell_ref.lunaris_theme = self.lunaris_theme.clone();
         shell_ref.appearance_conf = self.config.cosmic_conf.appearance_settings;
         if let Some(zoom_state) = shell_ref.zoom_state.as_mut() {
             zoom_state.increment = self.config.cosmic_conf.accessibility_zoom.increment;
@@ -1599,6 +1601,7 @@ impl Shell {
 
             theme,
             active_hint: config.cosmic_conf.active_hint,
+            lunaris_theme: lunaris_theme::LunarisTheme::load(),
             overview_mode: OverviewMode::None,
             swap_indicator: None,
             resize_mode: ResizeMode::None,
@@ -3800,7 +3803,7 @@ impl Shell {
             GrabStartData::Touch(start_data) => Trigger::Touch(start_data.slot),
         };
         let active_hint = if config.cosmic_conf.active_hint {
-            self.theme.cosmic().active_hint as u8
+            self.lunaris_theme.active_hint as u8
         } else {
             0
         };

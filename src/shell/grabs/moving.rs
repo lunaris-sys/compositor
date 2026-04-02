@@ -68,7 +68,7 @@ pub struct MoveGrabState {
 
 impl MoveGrabState {
     #[profiling::function]
-    pub fn render<I, R>(&self, renderer: &mut R, output: &Output, theme: &CosmicTheme) -> Vec<I>
+    pub fn render<I, R>(&self, renderer: &mut R, output: &Output, theme: &CosmicTheme, lt: &lunaris_theme::LunarisTheme) -> Vec<I>
     where
         R: Renderer + ImportAll + ImportMem + AsGlowRenderer,
         R::TextureId: Send + Clone + 'static,
@@ -108,7 +108,7 @@ impl MoveGrabState {
             + self.window_offset
             - scaling_offset;
 
-        let active_window_hint = crate::theme::active_window_hint(theme);
+        let hint_rgb = crate::theme::lunaris_hint_rgb(lt);
         let radius = self
             .element()
             .corner_radius(window_geo.size, self.indicator_thickness);
@@ -132,11 +132,7 @@ impl MoveGrabState {
                     radius,
                     alpha,
                     output_scale.x,
-                    [
-                        active_window_hint.red,
-                        active_window_hint.green,
-                        active_window_hint.blue,
-                    ],
+                    hint_rgb,
                 ),
             ))
         } else {
@@ -148,12 +144,14 @@ impl MoveGrabState {
             layers.non_exclusive_zone()
         };
 
-        let gaps = (theme.gaps.0 as i32, theme.gaps.1 as i32);
+        let gaps = (lt.gaps.0 as i32, lt.gaps.1 as i32);
         let thickness = self.indicator_thickness.max(1);
+        let lt_radius = lt.radius_s.map(|r| r.round() as u8);
 
         let snapping_indicator = match &self.snapping_zone {
             Some(t) if &self.cursor_output == output => {
-                let base_color = theme.palette.neutral_9;
+                // Neutral background for snapping zone overlay.
+                let base_color = lt.fg_secondary;
                 let overlay_geometry = t.overlay_geometry(non_exclusive_geometry, gaps);
                 vec![
                     CosmicMappedRenderElement::from(IndicatorShader::element(
@@ -161,27 +159,18 @@ impl MoveGrabState {
                         Key::Window(Usage::SnappingIndicator, self.window.key()),
                         overlay_geometry,
                         thickness,
-                        [
-                            theme.radius_s()[0] as u8,
-                            theme.radius_s()[1] as u8,
-                            theme.radius_s()[2] as u8,
-                            theme.radius_s()[3] as u8,
-                        ],
+                        lt_radius,
                         1.0,
                         output_scale.x,
-                        [
-                            active_window_hint.red,
-                            active_window_hint.green,
-                            active_window_hint.blue,
-                        ],
+                        hint_rgb,
                     )),
                     CosmicMappedRenderElement::from(BackdropShader::element(
                         renderer,
                         Key::Window(Usage::SnappingIndicator, self.window.key()),
                         t.overlay_geometry(non_exclusive_geometry, gaps),
-                        theme.radius_s()[0], // TODO: Fix once shaders support 4 corner radii customization
+                        lt.radius_s[0],
                         0.4,
-                        [base_color.red, base_color.green, base_color.blue],
+                        [base_color[0], base_color[1], base_color[2]],
                     )),
                 ]
             }

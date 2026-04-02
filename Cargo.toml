@@ -16,6 +16,7 @@ tempfile = { version = "3", optional = true }
 prost = "0.13"
 uuid = { version = "1", features = ["v7"] }
 anyhow = { version = "1.0.102", features = ["backtrace"] }
+lunaris-theme = { path = "../sdk/theme" }
 bitflags = "2.11.0"
 calloop = { version = "0.14.4", features = ["executor"] }
 toml = "0.8"

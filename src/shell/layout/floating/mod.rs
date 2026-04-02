@@ -1610,7 +1610,7 @@ impl FloatingLayout {
                         .collect();
                 }
 
-                let active_window_hint = crate::theme::active_window_hint(theme);
+                let hint_rgb = crate::theme::lunaris_hint_rgb(&crate::theme::lunaris_theme());
                 let radius = elem.corner_radius(geometry.size.as_logical(), indicator_thickness);
                 if indicator_thickness > 0 {
                     let element = IndicatorShader::focus_element(
@@ -1621,11 +1621,7 @@ impl FloatingLayout {
                         radius,
                         alpha,
                         output_scale,
-                        [
-                            active_window_hint.red,
-                            active_window_hint.green,
-                            active_window_hint.blue,
-                        ],
+                        hint_rgb,
                     );
                     window_elements.insert(0, element.into());
                 }
@@ -1655,7 +1651,7 @@ impl FloatingLayout {
     }
 
     fn gaps(&self) -> (i32, i32) {
-        let g = self.theme.cosmic().gaps;
+        let g = crate::theme::lunaris_theme().gaps;
         (g.0 as i32, g.1 as i32)
     }
 }

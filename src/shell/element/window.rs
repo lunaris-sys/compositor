@@ -6,20 +6,15 @@ use crate::{
         element::{AsGlowRenderer, FromGlesError},
         shadow::ShadowShader,
     },
-    hooks::{Decorations, HOOKS},
     shell::{
         element::{CosmicMappedKey, CosmicMappedKeyInner},
         focus::target::PointerFocusTarget,
         grabs::{ReleaseMode, ResizeEdge},
     },
     state::State,
-    utils::{
-        iced::{IcedElement, Program},
-        prelude::*,
-    },
+    utils::prelude::*,
 };
 use calloop::LoopHandle;
-use cosmic::iced::{Color, Task};
 use cosmic_comp_config::AppearanceConfig;
 use smithay::{
     backend::{
@@ -27,7 +22,7 @@ use smithay::{
         renderer::{
             ImportAll, ImportMem, Renderer,
             element::{
-                AsRenderElements, Element, Id as RendererId, Kind, RenderElement,
+                Element, Id as RendererId, Kind, RenderElement,
                 UnderlyingStorage, memory::MemoryRenderBufferRenderElement,
                 surface::WaylandSurfaceRenderElement,
             },
@@ -61,7 +56,7 @@ use std::{
     fmt,
     hash::Hash,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
@@ -69,20 +64,47 @@ use wayland_backend::server::ObjectId;
 
 use super::CosmicSurface;
 
+/// Height of server-side decoration header in logical pixels.
 pub const SSD_HEIGHT: i32 = 36;
+/// Width of the invisible resize border around windows.
 pub const RESIZE_BORDER: i32 = 10;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct CosmicWindow(pub(super) IcedElement<CosmicWindowInternal>);
+/// A single window managed by the compositor, with optional server-side decorations.
+#[derive(Clone)]
+pub struct CosmicWindow {
+    pub(super) inner: Arc<Mutex<CosmicWindowInternal>>,
+    handle: LoopHandle<'static, crate::state::State>,
+}
+
+// SAFETY: LoopHandle contains an Rc internally, making CosmicWindow !Send/!Sync by
+// default. All LoopHandle usage is on the main thread (calloop event loop), and the
+// interior state is serialised through the Mutex. This mirrors CosmicStack.
+unsafe impl Send for CosmicWindow {}
+unsafe impl Sync for CosmicWindow {}
+
+impl PartialEq for CosmicWindow {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for CosmicWindow {}
+
+impl Hash for CosmicWindow {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.inner).hash(state);
+    }
+}
 
 impl fmt::Debug for CosmicWindow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CosmicWindow")
-            .field("internal", &self.0)
+            .field("inner", &Arc::as_ptr(&self.inner))
             .finish_non_exhaustive()
     }
 }
 
+/// Internal state for a single managed window.
 #[derive(Debug)]
 pub struct CosmicWindowInternal {
     pub(super) window: CosmicSurface,
@@ -91,7 +113,7 @@ pub struct CosmicWindowInternal {
     pointer_entered: AtomicU8,
     last_title: Mutex<String>,
     tiled: AtomicBool,
-    theme: Mutex<cosmic::Theme>,
+    pub(crate) theme: Mutex<cosmic::Theme>,
     appearance_conf: Mutex<AppearanceConfig>,
 }
 
@@ -163,21 +185,23 @@ impl Focus {
 }
 
 impl CosmicWindowInternal {
+    /// Atomically swap the current focus state, returning the previous value.
     pub fn swap_focus(&self, focus: Option<Focus>) -> Option<Focus> {
         let value = focus.map_or(0, |x| x as u8);
         unsafe { Focus::from_u8(self.pointer_entered.swap(value, Ordering::SeqCst)) }
     }
 
+    /// Returns the current focus state.
     pub fn current_focus(&self) -> Option<Focus> {
         unsafe { Focus::from_u8(self.pointer_entered.load(Ordering::SeqCst)) }
     }
 
-    /// returns if the window has any current or pending server-side decorations
+    /// Returns if the window has any current or pending server-side decorations.
     pub fn has_ssd(&self, pending: bool) -> bool {
         !self.window.is_decorated(pending)
     }
 
-    /// returns if the window is currently tiled
+    /// Returns if the window is currently tiled.
     pub fn is_tiled(&self) -> bool {
         self.tiled.load(Ordering::Acquire)
     }
@@ -188,6 +212,12 @@ impl CosmicWindowInternal {
 }
 
 impl CosmicWindow {
+    /// Lock the internal state and return a guard.
+    fn p(&self) -> MutexGuard<'_, CosmicWindowInternal> {
+        self.inner.lock().unwrap()
+    }
+
+    /// Create a new CosmicWindow wrapping the given surface.
     pub fn new(
         window: impl Into<CosmicSurface>,
         handle: LoopHandle<'static, crate::state::State>,
@@ -195,123 +225,117 @@ impl CosmicWindow {
         appearance: AppearanceConfig,
     ) -> CosmicWindow {
         let window = window.into();
-        let width = window.geometry().size.w;
-        let last_title = window.title();
 
         if appearance.clip_floating_windows {
             window.set_tiled(true);
         }
 
-        CosmicWindow(IcedElement::new(
-            CosmicWindowInternal {
+        CosmicWindow {
+            inner: Arc::new(Mutex::new(CosmicWindowInternal {
                 window,
                 activated: AtomicBool::new(false),
                 pointer_entered: AtomicU8::new(0),
-                last_title: Mutex::new(last_title),
+                last_title: Mutex::new(String::new()),
                 tiled: AtomicBool::new(false),
-                theme: Mutex::new(theme.clone()),
+                theme: Mutex::new(theme),
                 appearance_conf: Mutex::new(appearance),
-            },
-            (width, SSD_HEIGHT),
+            })),
             handle,
-            theme,
-        ))
-    }
-
-    pub fn pending_size(&self) -> Option<Size<i32, Logical>> {
-        self.0.with_program(|p| {
-            let mut size = p.window.pending_size()?;
-            if p.has_ssd(true) {
-                size.h += SSD_HEIGHT;
-            }
-            Some(size)
-        })
-    }
-
-    pub fn set_geometry(&self, geo: Rectangle<i32, Global>) {
-        self.0.with_program(|p| {
-            let ssd_height = if p.has_ssd(true) { SSD_HEIGHT } else { 0 };
-            let loc = (geo.loc.x, geo.loc.y + ssd_height);
-            let size = (geo.size.w, std::cmp::max(geo.size.h - ssd_height, 0));
-            p.window
-                .set_geometry(Rectangle::new(loc.into(), size.into()), ssd_height as u32);
-        });
-    }
-
-    pub fn on_commit(&self, surface: &WlSurface) {
-        let mut geo = None;
-        self.0.with_program(|p| {
-            if &p.window == surface {
-                p.window.0.on_commit();
-                geo = Some(p.window.geometry());
-            }
-        });
-        if let Some(geo) = geo {
-            self.0.resize(Size::from((geo.size.w, SSD_HEIGHT)));
         }
     }
 
-    pub fn surface(&self) -> CosmicSurface {
-        self.0.with_program(|p| p.window.clone())
+    /// Returns the pending size of the window including SSD header if applicable.
+    pub fn pending_size(&self) -> Option<Size<i32, Logical>> {
+        let p = self.p();
+        let mut size = p.window.pending_size()?;
+        if p.has_ssd(true) {
+            size.h += SSD_HEIGHT;
+        }
+        Some(size)
     }
 
+    /// Set the geometry of the window, accounting for SSD header offset.
+    pub fn set_geometry(&self, geo: Rectangle<i32, Global>) {
+        let p = self.p();
+        let ssd_height = if p.has_ssd(true) { SSD_HEIGHT } else { 0 };
+        let loc = (geo.loc.x, geo.loc.y + ssd_height);
+        let size = (geo.size.w, std::cmp::max(geo.size.h - ssd_height, 0));
+        p.window
+            .set_geometry(Rectangle::new(loc.into(), size.into()), ssd_height as u32);
+    }
+
+    /// Handle a surface commit for this window.
+    pub fn on_commit(&self, surface: &WlSurface) {
+        let p = self.p();
+        if &p.window == surface {
+            p.window.0.on_commit();
+        }
+    }
+
+    /// Return the underlying CosmicSurface.
+    pub fn surface(&self) -> CosmicSurface {
+        self.p().window.clone()
+    }
+
+    /// Find the focus target under a relative position.
     pub fn focus_under(
         &self,
         mut relative_pos: Point<f64, Logical>,
         surface_type: WindowSurfaceType,
     ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
-        self.0.with_program(|p| {
-            let mut offset = Point::from((0., 0.));
-            let mut window_ui = None;
-            let has_ssd = p.has_ssd(false);
-            if (has_ssd || p.has_tiled_state())
-                && surface_type.contains(WindowSurfaceType::TOPLEVEL)
+        let p = self.p();
+        let mut offset = Point::from((0., 0.));
+        let mut window_ui = None;
+        let has_ssd = p.has_ssd(false);
+        if (has_ssd || p.has_tiled_state())
+            && surface_type.contains(WindowSurfaceType::TOPLEVEL)
+        {
+            let geo = p.window.geometry();
+
+            let point_i32 = relative_pos.to_i32_round::<i32>();
+            let ssd_height = if has_ssd { SSD_HEIGHT } else { 0 };
+
+            if (point_i32.x - geo.loc.x >= -RESIZE_BORDER && point_i32.x - geo.loc.x < 0)
+                || (point_i32.y - geo.loc.y >= -RESIZE_BORDER && point_i32.y - geo.loc.y < 0)
+                || (point_i32.x - geo.loc.x >= geo.size.w
+                    && point_i32.x - geo.loc.x < geo.size.w + RESIZE_BORDER)
+                || (point_i32.y - geo.loc.y >= geo.size.h + ssd_height
+                    && point_i32.y - geo.loc.y < geo.size.h + ssd_height + RESIZE_BORDER)
             {
-                let geo = p.window.geometry();
-
-                let point_i32 = relative_pos.to_i32_round::<i32>();
-                let ssd_height = if has_ssd { SSD_HEIGHT } else { 0 };
-
-                if (point_i32.x - geo.loc.x >= -RESIZE_BORDER && point_i32.x - geo.loc.x < 0)
-                    || (point_i32.y - geo.loc.y >= -RESIZE_BORDER && point_i32.y - geo.loc.y < 0)
-                    || (point_i32.x - geo.loc.x >= geo.size.w
-                        && point_i32.x - geo.loc.x < geo.size.w + RESIZE_BORDER)
-                    || (point_i32.y - geo.loc.y >= geo.size.h + ssd_height
-                        && point_i32.y - geo.loc.y < geo.size.h + ssd_height + RESIZE_BORDER)
-                {
-                    window_ui = Some((
-                        PointerFocusTarget::WindowUI(self.clone()),
-                        Point::from((0., 0.)),
-                    ));
-                }
-
-                if has_ssd && (point_i32.y - geo.loc.y < SSD_HEIGHT) {
-                    window_ui = Some((
-                        PointerFocusTarget::WindowUI(self.clone()),
-                        Point::from((0., 0.)),
-                    ));
-                }
+                window_ui = Some((
+                    PointerFocusTarget::WindowUI(self.clone()),
+                    Point::from((0., 0.)),
+                ));
             }
 
-            if has_ssd {
-                relative_pos.y -= SSD_HEIGHT as f64;
-                offset.y += SSD_HEIGHT as f64;
+            if has_ssd && (point_i32.y - geo.loc.y < SSD_HEIGHT) {
+                window_ui = Some((
+                    PointerFocusTarget::WindowUI(self.clone()),
+                    Point::from((0., 0.)),
+                ));
             }
+        }
 
-            window_ui.or_else(|| {
-                p.window
-                    .focus_under(relative_pos, surface_type)
-                    .map(|(target, surface_offset)| (target, offset + surface_offset))
-            })
+        if has_ssd {
+            relative_pos.y -= SSD_HEIGHT as f64;
+            offset.y += SSD_HEIGHT as f64;
+        }
+
+        window_ui.or_else(|| {
+            p.window
+                .focus_under(relative_pos, surface_type)
+                .map(|(target, surface_offset)| (target, offset + surface_offset))
         })
     }
 
+    /// Check whether this window wraps the given surface.
     pub fn contains_surface(&self, window: &CosmicSurface) -> bool {
-        self.0.with_program(|p| &p.window == window)
+        &self.p().window == window
     }
 
+    /// Returns the offset of the client area relative to the window origin (SSD header).
     pub fn offset(&self) -> Point<i32, Logical> {
-        let has_ssd = self.0.with_program(|p| p.has_ssd(false));
+        let has_ssd = self.p().has_ssd(false);
         if has_ssd {
             Point::from((0, SSD_HEIGHT))
         } else {
@@ -319,10 +343,12 @@ impl CosmicWindow {
         }
     }
 
+    /// Returns a clone of the loop handle.
     pub(super) fn loop_handle(&self) -> LoopHandle<'static, crate::state::State> {
-        self.0.loop_handle()
+        self.handle.clone()
     }
 
+    /// Render popup elements for this window.
     pub fn popup_render_elements<R, C>(
         &self,
         renderer: &mut R,
@@ -335,7 +361,7 @@ impl CosmicWindow {
         R::TextureId: Send + Clone + 'static,
         C: From<CosmicWindowRenderElement<R>>,
     {
-        let has_ssd = self.0.with_program(|p| p.has_ssd(false));
+        let has_ssd = self.p().has_ssd(false);
 
         let window_loc = if has_ssd {
             location + Point::from((0, (SSD_HEIGHT as f64 * scale.y) as i32))
@@ -343,17 +369,17 @@ impl CosmicWindow {
             location
         };
 
-        self.0.with_program(|p| {
-            p.window
-                .popup_render_elements::<R, CosmicWindowRenderElement<R>>(
-                    renderer, window_loc, scale, alpha,
-                )
-                .into_iter()
-                .map(C::from)
-                .collect()
-        })
+        let p = self.p();
+        p.window
+            .popup_render_elements::<R, CosmicWindowRenderElement<R>>(
+                renderer, window_loc, scale, alpha,
+            )
+            .into_iter()
+            .map(C::from)
+            .collect()
     }
 
+    /// Render a shadow element for this window.
     pub fn shadow_render_element<R, C>(
         &self,
         renderer: &mut R,
@@ -368,72 +394,77 @@ impl CosmicWindow {
         R::TextureId: Send + Clone + 'static,
         C: From<CosmicWindowRenderElement<R>>,
     {
-        self.0.with_program(|p| {
-            let has_ssd = p.has_ssd(false);
-            let is_tiled = p.is_tiled();
-            let activated = p.window.is_activated(false);
-            let appearance = p.appearance_conf.lock().unwrap();
-            let theme = p.theme.lock().unwrap();
+        let p = self.p();
+        let has_ssd = p.has_ssd(false);
+        let is_tiled = p.is_tiled();
+        let activated = p.window.is_activated(false);
+        let appearance = p.appearance_conf.lock().unwrap();
+        let theme = p.theme.lock().unwrap();
 
-            if p.window.is_maximized(false) {
-                return None;
+        if p.window.is_maximized(false) {
+            return None;
+        }
+
+        let clip = (!is_tiled && appearance.clip_floating_windows)
+            || (is_tiled && appearance.clip_tiled_windows);
+        let should_draw_shadow = if is_tiled {
+            appearance.shadow_tiled_windows
+        } else {
+            appearance.clip_floating_windows || has_ssd
+        };
+
+        if !should_draw_shadow {
+            return None;
+        }
+        let lt = crate::theme::lunaris_theme();
+        let mut radii = lt
+            .radius_s
+            .map(|x| if x < 4.0 { x } else { x + 4.0 })
+            .map(|x| (x * scale as f32).round() as u8);
+        if has_ssd && !clip {
+            // bottom corners
+            radii[0] = 0;
+            radii[2] = 0;
+            if is_tiled {
+                // top corners
+                radii[1] = 0;
+                radii[3] = 0;
             }
+        }
 
-            let clip = (!is_tiled && appearance.clip_floating_windows)
-                || (is_tiled && appearance.clip_tiled_windows);
-            let should_draw_shadow = if is_tiled {
-                appearance.shadow_tiled_windows
-            } else {
-                appearance.clip_floating_windows || has_ssd
-            };
+        let mut geo = SpaceElement::geometry(&p.window).to_f64();
+        if has_ssd {
+            geo.size.h += SSD_HEIGHT as f64;
+        }
+        geo = geo.upscale(scale);
+        geo.loc += location.to_f64().to_logical(output_scale);
+        if let Some(max_size) = max_size {
+            geo.size = geo.size.clamp(Size::default(), max_size.to_f64());
+        }
 
-            if !should_draw_shadow {
-                return None;
-            }
-            let lt = crate::theme::lunaris_theme();
-            let mut radii = lt
-                .radius_s
-                .map(|x| if x < 4.0 { x } else { x + 4.0 })
-                .map(|x| (x * scale as f32).round() as u8);
-            if has_ssd && !clip {
-                // bottom corners
-                radii[0] = 0;
-                radii[2] = 0;
-                if is_tiled {
-                    // top corners
-                    radii[1] = 0;
-                    radii[3] = 0;
-                }
-            }
+        let _theme = theme; // keep borrow alive until here
+        let _appearance = appearance;
+        drop(_theme);
+        drop(_appearance);
 
-            let mut geo = SpaceElement::geometry(&p.window).to_f64();
-            if has_ssd {
-                geo.size.h += SSD_HEIGHT as f64;
-            }
-            geo = geo.upscale(scale);
-            geo.loc += location.to_f64().to_logical(output_scale);
-            if let Some(max_size) = max_size {
-                geo.size = geo.size.clamp(Size::default(), max_size.to_f64());
-            }
+        let window_key =
+            CosmicMappedKey(CosmicMappedKeyInner::Window(Arc::downgrade(&self.inner)));
 
-            let window_key =
-                CosmicMappedKey(CosmicMappedKeyInner::Window(Arc::downgrade(&self.0.0)));
-
-            Some(
-                CosmicWindowRenderElement::Shadow(ShadowShader::element(
-                    renderer,
-                    window_key,
-                    geo.to_i32_round().as_local(),
-                    radii,
-                    if activated { alpha } else { alpha * 0.75 },
-                    output_scale.x,
-                    lt.is_dark,
-                ))
-                .into(),
-            )
-        })
+        Some(
+            CosmicWindowRenderElement::Shadow(ShadowShader::element(
+                renderer,
+                window_key,
+                geo.to_i32_round().as_local(),
+                radii,
+                if activated { alpha } else { alpha * 0.75 },
+                output_scale.x,
+                lt.is_dark,
+            ))
+            .into(),
+        )
     }
 
+    /// Render all elements for this window (border, surface, clipping).
     pub fn render_elements<R, C>(
         &self,
         renderer: &mut R,
@@ -448,7 +479,8 @@ impl CosmicWindow {
         R::TextureId: Send + Clone + 'static,
         C: From<CosmicWindowRenderElement<R>>,
     {
-        let (has_ssd, is_tiled, is_maximized, mut radii, appearance) = self.0.with_program(|p| {
+        let (has_ssd, is_tiled, is_maximized, mut radii, appearance) = {
+            let p = self.p();
             (
                 p.has_ssd(false),
                 p.is_tiled(),
@@ -459,7 +491,7 @@ impl CosmicWindow {
                     .map(|x| x.round() as u8),
                 *p.appearance_conf.lock().unwrap(),
             )
-        });
+        };
         let clip = ((!is_tiled && appearance.clip_floating_windows)
             || (is_tiled && appearance.clip_tiled_windows))
             && !is_maximized;
@@ -482,12 +514,13 @@ impl CosmicWindow {
 
         let mut elements = Vec::new();
 
-        let (mut geo, bg_divider) = self.0.with_program(|p| {
+        let (mut geo, bg_divider) = {
+            let p = self.p();
             (
                 SpaceElement::geometry(&p.window).to_f64(),
                 p.theme.lock().unwrap().cosmic().bg_divider(),
             )
-        });
+        };
         geo.loc += location.to_f64().to_logical(scale);
         if has_ssd {
             geo.size.h += SSD_HEIGHT as f64;
@@ -498,7 +531,7 @@ impl CosmicWindow {
 
         if (has_ssd || clip) && !is_maximized {
             let window_key =
-                CosmicMappedKey(CosmicMappedKeyInner::Window(Arc::downgrade(&self.0.0)));
+                CosmicMappedKey(CosmicMappedKeyInner::Window(Arc::downgrade(&self.inner)));
 
             let (r, g, b, a) = bg_divider.into_components();
             let elem = CosmicWindowRenderElement::Border(IndicatorShader::element(
@@ -514,7 +547,8 @@ impl CosmicWindow {
             elements.push(elem);
         }
 
-        let window_elements = self.0.with_program(|p| {
+        let window_elements = {
+            let p = self.p();
             p.window
                 .render_elements::<R, WaylandSurfaceRenderElement<R>>(
                     renderer,
@@ -523,7 +557,7 @@ impl CosmicWindow {
                     alpha,
                     scanout_override,
                 )
-        });
+        };
         if window_elements.is_empty() {
             return Vec::new();
         }
@@ -545,380 +579,189 @@ impl CosmicWindow {
             }
         }));
 
-        if has_ssd {
-            let ssd_loc = location
-                + self
-                    .0
-                    .with_program(|p| p.window.geometry().loc)
-                    .to_physical_precise_round(scale);
-            elements.extend(AsRenderElements::<R>::render_elements::<
-                CosmicWindowRenderElement<R>,
-            >(&self.0, renderer, ssd_loc, scale, alpha))
-        }
+        // SSD header rendering removed: desktop-shell renders headers via protocol.
 
         elements.into_iter().map(C::from).collect()
     }
 
+    /// Update the theme stored in internal state.
     pub(crate) fn set_theme(&self, theme: cosmic::Theme) {
-        self.0.with_program(|p| {
-            *p.theme.lock().unwrap() = theme.clone();
-        });
-        self.0.set_theme(theme);
+        let p = self.p();
+        *p.theme.lock().unwrap() = theme;
     }
 
+    /// Update the appearance configuration, adjusting tiling state if needed.
     pub fn update_appearance_conf(&self, appearance: &AppearanceConfig) {
-        self.0.with_program(|p| {
-            let mut conf = p.appearance_conf.lock().unwrap();
-            if &*conf != appearance {
-                *conf = *appearance;
-                if appearance.clip_floating_windows {
-                    p.window.set_tiled(true);
-                } else if !p.tiled.load(Ordering::Acquire) {
-                    p.window.set_tiled(false);
-                }
-                p.window.send_configure();
+        let p = self.p();
+        let mut conf = p.appearance_conf.lock().unwrap();
+        if &*conf != appearance {
+            *conf = *appearance;
+            if appearance.clip_floating_windows {
+                p.window.set_tiled(true);
+            } else if !p.tiled.load(Ordering::Acquire) {
+                p.window.set_tiled(false);
             }
-        })
+            p.window.send_configure();
+        }
     }
 
+    /// Force a redraw (no-op without Iced).
     pub(crate) fn force_redraw(&self) {
-        self.0.force_redraw();
+        // No-op: Iced rendering removed.
     }
 
+    /// Returns the minimum size of the window including SSD header.
     pub fn min_size(&self) -> Option<Size<i32, Logical>> {
-        self.0
-            .with_program(|p| p.window.min_size_without_ssd())
-            .map(|size| {
-                if self.0.with_program(|p| !p.window.is_decorated(false)) {
-                    size + (0, SSD_HEIGHT).into()
-                } else {
-                    size
-                }
-            })
-    }
-    pub fn max_size(&self) -> Option<Size<i32, Logical>> {
-        self.0
-            .with_program(|p| p.window.max_size_without_ssd())
-            .map(|size| {
-                if self.0.with_program(|p| !p.window.is_decorated(false)) {
-                    size + (0, SSD_HEIGHT).into()
-                } else {
-                    size
-                }
-            })
-    }
-
-    pub fn set_tiled(&self, tiled: bool) {
-        self.0.with_program(|p| {
-            p.tiled.store(tiled, Ordering::Release);
-            if !p.appearance_conf.lock().unwrap().clip_floating_windows {
-                p.window.set_tiled(tiled);
-            }
-        });
-    }
-
-    pub fn corner_radius(&self, geometry_size: Size<i32, Logical>, default_radius: u8) -> [u8; 4] {
-        self.0.with_program(|p| {
-            let has_ssd = p.has_ssd(false);
-            let is_tiled = p.is_tiled();
-            let appearance = p.appearance_conf.lock().unwrap();
-
-            let clip = ((!is_tiled && appearance.clip_floating_windows)
-                || (is_tiled && appearance.clip_tiled_windows))
-                && !p.window.is_maximized(false);
-            let round =
-                (!is_tiled || appearance.clip_tiled_windows) && !p.window.is_maximized(false);
-            let radii = if round {
-                {
-                    crate::theme::lunaris_theme()
-                        .radius_s
-                        .map(|x| if x < 4.0 { x } else { x + 4.0 })
-                        .map(|x| x.round() as u8)
-                }
+        let p = self.p();
+        p.window.min_size_without_ssd().map(|size| {
+            if p.has_ssd(false) {
+                size + (0, SSD_HEIGHT).into()
             } else {
-                [0; 4]
-            };
-
-            match (has_ssd, clip) {
-                (has_ssd, true) => {
-                    let mut corners = p.window.corner_radius(geometry_size).unwrap_or(radii);
-
-                    corners[0] = radii[0].max(corners[0]);
-                    corners[1] = if has_ssd {
-                        radii[1]
-                    } else {
-                        radii[1].max(corners[1])
-                    };
-                    corners[2] = radii[2].max(corners[2]);
-                    corners[3] = if has_ssd {
-                        radii[3]
-                    } else {
-                        radii[3].max(corners[3])
-                    };
-
-                    corners
-                }
-                (true, false) => p
-                    .window
-                    .corner_radius(geometry_size)
-                    .map(|[a, _, c, _]| [a, radii[1], c, radii[3]])
-                    .unwrap_or([default_radius, radii[1], default_radius, radii[3]]),
-                (false, false) => p
-                    .window
-                    .corner_radius(geometry_size)
-                    .unwrap_or([default_radius; 4]),
+                size
             }
         })
     }
-}
 
-#[derive(Debug, Clone, Copy)]
-pub enum Message {
-    DragStart,
-    Minimize,
-    Maximize,
-    Close,
-    Menu,
-}
-
-impl Program for CosmicWindowInternal {
-    type Message = Message;
-
-    fn update(
-        &mut self,
-        message: Self::Message,
-        loop_handle: &LoopHandle<'static, crate::state::State>,
-        last_seat: Option<&(Seat<State>, Serial)>,
-    ) -> Task<Self::Message> {
-        match message {
-            Message::DragStart => {
-                if let Some((seat, serial)) = last_seat.cloned()
-                    && let Some(surface) = self.window.wl_surface().map(Cow::into_owned)
-                {
-                    loop_handle.insert_idle(move |state| {
-                        let res = state.common.shell.write().move_request(
-                            &surface,
-                            &seat,
-                            serial,
-                            ReleaseMode::NoMouseButtons,
-                            false,
-                            &state.common.config,
-                            &state.common.event_loop_handle,
-                            false,
-                        );
-                        if let Some((grab, focus)) = res {
-                            if grab.is_touch_grab() {
-                                seat.get_touch().unwrap().set_grab(state, grab, serial);
-                            } else {
-                                seat.get_pointer()
-                                    .unwrap()
-                                    .set_grab(state, grab, serial, focus);
-                            }
-                        }
-                    });
-                }
+    /// Returns the maximum size of the window including SSD header.
+    pub fn max_size(&self) -> Option<Size<i32, Logical>> {
+        let p = self.p();
+        p.window.max_size_without_ssd().map(|size| {
+            if p.has_ssd(false) {
+                size + (0, SSD_HEIGHT).into()
+            } else {
+                size
             }
-            Message::Minimize => {
-                if let Some(surface) = self.window.wl_surface().map(Cow::into_owned) {
-                    loop_handle.insert_idle(move |state| {
-                        let mut shell = state.common.shell.write();
-                        shell.minimize_request(&surface)
-                    });
-                }
-            }
-            Message::Maximize => {
-                if let Some(surface) = self.window.wl_surface().map(Cow::into_owned) {
-                    loop_handle.insert_idle(move |state| {
-                        let mut shell = state.common.shell.write();
-                        if let Some(mapped) = shell.element_for_surface(&surface).cloned() {
-                            let seat = shell.seats.last_active().clone();
-                            shell.maximize_toggle(&mapped, &seat, &state.common.event_loop_handle)
-                        }
-                    });
-                }
-            }
-            Message::Close => self.window.close(),
-            Message::Menu => {
-                if let Some((seat, serial)) = last_seat.cloned()
-                    && let Some(surface) = self.window.wl_surface().map(Cow::into_owned)
-                {
-                    loop_handle.insert_idle(move |state| {
-                        let shell = state.common.shell.read();
-                        if let Some(mapped) = shell.element_for_surface(&surface).cloned() {
-                            let position = if let Some((output, set)) =
-                                shell.workspaces.sets.iter().find(|(_, set)| {
-                                    set.sticky_layer.mapped().any(|m| m == &mapped)
-                                }) {
-                                set.sticky_layer
-                                    .element_geometry(&mapped)
-                                    .unwrap()
-                                    .loc
-                                    .to_global(output)
-                            } else if let Some(workspace) = shell.space_for(&mapped) {
-                                let Some(elem_geo) = workspace.element_geometry(&mapped) else {
-                                    return;
-                                };
-                                elem_geo.loc.to_global(&workspace.output)
-                            } else {
-                                return;
-                            };
-
-                            let pointer = seat.get_pointer().unwrap();
-                            let mut cursor = pointer.current_location().to_i32_round();
-                            cursor.y -= SSD_HEIGHT;
-
-                            let res = shell.menu_request(
-                                false,
-                                &surface,
-                                &seat,
-                                serial,
-                                cursor - position.as_logical(),
-                                false,
-                                &state.common.config,
-                                &state.common.event_loop_handle,
-                                &state.common.display_handle,
-                                &mut state.common.shell_overlay_state,
-                                &mut state.common.pending_menu_callbacks,
-                            );
-
-                            std::mem::drop(shell);
-                            if let Some((grab, focus)) = res {
-                                pointer.set_grab(state, grab, serial, focus);
-                            }
-                        }
-                    });
-                }
-            }
-        }
-        Task::none()
+        })
     }
 
-    fn background_color(&self, _theme: &cosmic::Theme) -> Color {
-        if self.window.is_maximized(false) {
-            let [r, g, b, a] = crate::theme::lunaris_theme().bg_app;
-            Color { r, g, b, a }
+    /// Set the tiled state of this window.
+    pub fn set_tiled(&self, tiled: bool) {
+        let p = self.p();
+        p.tiled.store(tiled, Ordering::Release);
+        if !p.appearance_conf.lock().unwrap().clip_floating_windows {
+            p.window.set_tiled(tiled);
+        }
+    }
+
+    /// Compute the corner radii for this window given geometry and defaults.
+    pub fn corner_radius(&self, geometry_size: Size<i32, Logical>, default_radius: u8) -> [u8; 4] {
+        let p = self.p();
+        let has_ssd = p.has_ssd(false);
+        let is_tiled = p.is_tiled();
+        let appearance = p.appearance_conf.lock().unwrap();
+
+        let clip = ((!is_tiled && appearance.clip_floating_windows)
+            || (is_tiled && appearance.clip_tiled_windows))
+            && !p.window.is_maximized(false);
+        let round =
+            (!is_tiled || appearance.clip_tiled_windows) && !p.window.is_maximized(false);
+        let radii = if round {
+            {
+                crate::theme::lunaris_theme()
+                    .radius_s
+                    .map(|x| if x < 4.0 { x } else { x + 4.0 })
+                    .map(|x| x.round() as u8)
+            }
         } else {
-            Color::TRANSPARENT
+            [0; 4]
+        };
+
+        match (has_ssd, clip) {
+            (has_ssd, true) => {
+                let mut corners = p.window.corner_radius(geometry_size).unwrap_or(radii);
+
+                corners[0] = radii[0].max(corners[0]);
+                corners[1] = if has_ssd {
+                    radii[1]
+                } else {
+                    radii[1].max(corners[1])
+                };
+                corners[2] = radii[2].max(corners[2]);
+                corners[3] = if has_ssd {
+                    radii[3]
+                } else {
+                    radii[3].max(corners[3])
+                };
+
+                corners
+            }
+            (true, false) => p
+                .window
+                .corner_radius(geometry_size)
+                .map(|[a, _, c, _]| [a, radii[1], c, radii[3]])
+                .unwrap_or([default_radius, radii[1], default_radius, radii[3]]),
+            (false, false) => p
+                .window
+                .corner_radius(geometry_size)
+                .unwrap_or([default_radius; 4]),
         }
-    }
-
-    fn view(&self) -> cosmic::Element<'_, Self::Message> {
-        HOOKS.get().unwrap().window_decorations.view(self)
-    }
-}
-
-#[derive(Debug)]
-pub struct DefaultDecorations;
-
-impl Decorations<CosmicWindowInternal, Message> for DefaultDecorations {
-    fn view(&self, win: &CosmicWindowInternal) -> cosmic::Element<'_, Message> {
-        let sharp_corners = win.window.is_maximized(false)
-            || (win.is_tiled() && !win.appearance_conf.lock().unwrap().clip_tiled_windows);
-
-        let mut header = cosmic::widget::header_bar()
-            .title(win.last_title.lock().unwrap().clone())
-            .on_drag(Message::DragStart)
-            .on_close(Message::Close)
-            .focused(win.window.is_activated(false))
-            .on_double_click(Message::Maximize)
-            .on_right_click(Message::Menu)
-            .is_ssd(true)
-            .sharp_corners(sharp_corners);
-
-        if cosmic::config::show_minimize() {
-            header = header.on_minimize(Message::Minimize)
-        }
-        if cosmic::config::show_maximize() {
-            header = header.on_maximize(Message::Maximize)
-        }
-
-        header.into()
     }
 }
 
 impl IsAlive for CosmicWindow {
     fn alive(&self) -> bool {
-        self.0.with_program(|p| p.window.alive())
+        self.p().window.alive()
     }
 }
 
 impl SpaceElement for CosmicWindow {
     fn bbox(&self) -> Rectangle<i32, Logical> {
-        self.0.with_program(|p| {
-            let mut bbox = SpaceElement::bbox(&p.window);
-            let has_ssd = p.has_ssd(false);
+        let p = self.p();
+        let mut bbox = SpaceElement::bbox(&p.window);
+        let has_ssd = p.has_ssd(false);
 
-            if has_ssd || p.has_tiled_state() {
-                bbox.loc -= Point::from((RESIZE_BORDER, RESIZE_BORDER));
-                bbox.size += Size::from((RESIZE_BORDER * 2, RESIZE_BORDER * 2));
-            }
-            if has_ssd {
-                bbox.size.h += SSD_HEIGHT;
-            }
+        if has_ssd || p.has_tiled_state() {
+            bbox.loc -= Point::from((RESIZE_BORDER, RESIZE_BORDER));
+            bbox.size += Size::from((RESIZE_BORDER * 2, RESIZE_BORDER * 2));
+        }
+        if has_ssd {
+            bbox.size.h += SSD_HEIGHT;
+        }
 
-            bbox
-        })
+        bbox
     }
     fn is_in_input_region(&self, point: &Point<f64, Logical>) -> bool {
         self.focus_under(*point, WindowSurfaceType::ALL).is_some()
     }
     fn set_activate(&self, activated: bool) {
-        if self
-            .0
-            .with_program(|p| p.activated.load(Ordering::SeqCst) != activated)
-        {
-            SpaceElement::set_activate(&self.0, activated);
-            self.0.force_redraw();
-            self.0.with_program(|p| {
-                p.activated.store(activated, Ordering::SeqCst);
-                SpaceElement::set_activate(&p.window, activated);
-            });
+        let p = self.p();
+        if p.activated.load(Ordering::SeqCst) != activated {
+            p.activated.store(activated, Ordering::SeqCst);
+            SpaceElement::set_activate(&p.window, activated);
         }
     }
     #[profiling::function]
     fn output_enter(&self, output: &Output, overlap: Rectangle<i32, Logical>) {
-        SpaceElement::output_enter(&self.0, output, overlap);
-        self.0
-            .with_program(|p| SpaceElement::output_enter(&p.window, output, overlap));
+        let p = self.p();
+        SpaceElement::output_enter(&p.window, output, overlap);
     }
     #[profiling::function]
     fn output_leave(&self, output: &Output) {
-        SpaceElement::output_leave(&self.0, output);
-        self.0
-            .with_program(|p| SpaceElement::output_leave(&p.window, output));
+        let p = self.p();
+        SpaceElement::output_leave(&p.window, output);
     }
     fn geometry(&self) -> Rectangle<i32, Logical> {
-        self.0.with_program(|p| {
-            let mut geo = SpaceElement::geometry(&p.window);
-            if p.has_ssd(false) {
-                geo.size.h += SSD_HEIGHT;
-            }
-            geo
-        })
+        let p = self.p();
+        let mut geo = SpaceElement::geometry(&p.window);
+        if p.has_ssd(false) {
+            geo.size.h += SSD_HEIGHT;
+        }
+        geo
     }
     fn z_index(&self) -> u8 {
-        self.0.with_program(|p| SpaceElement::z_index(&p.window))
+        let p = self.p();
+        SpaceElement::z_index(&p.window)
     }
     #[profiling::function]
     fn refresh(&self) {
-        if self.0.with_program(|p| {
-            SpaceElement::refresh(&p.window);
-            if !p.has_ssd(true) {
-                return false;
-            }
-
+        let p = self.p();
+        SpaceElement::refresh(&p.window);
+        if p.has_ssd(true) {
             let title = p.window.title();
             let mut last_title = p.last_title.lock().unwrap();
             if *last_title != title {
                 *last_title = title;
-                true
-            } else {
-                false
             }
-        }) {
-            self.0.force_update();
-        } else {
-            SpaceElement::refresh(&self.0);
         }
     }
 }
@@ -931,12 +774,12 @@ impl KeyboardTarget<State> for CosmicWindow {
         keys: Vec<KeysymHandle<'_>>,
         serial: Serial,
     ) {
-        self.0
-            .with_program(|p| KeyboardTarget::enter(&p.window, seat, data, keys, serial))
+        let p = self.p();
+        KeyboardTarget::enter(&p.window, seat, data, keys, serial)
     }
     fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial) {
-        self.0
-            .with_program(|p| KeyboardTarget::leave(&p.window, seat, data, serial))
+        let p = self.p();
+        KeyboardTarget::leave(&p.window, seat, data, serial)
     }
     fn key(
         &self,
@@ -947,8 +790,8 @@ impl KeyboardTarget<State> for CosmicWindow {
         serial: Serial,
         time: u32,
     ) {
-        self.0
-            .with_program(|p| KeyboardTarget::key(&p.window, seat, data, key, state, serial, time))
+        let p = self.p();
+        KeyboardTarget::key(&p.window, seat, data, key, state, serial, time)
     }
     fn modifiers(
         &self,
@@ -957,60 +800,50 @@ impl KeyboardTarget<State> for CosmicWindow {
         modifiers: ModifiersState,
         serial: Serial,
     ) {
-        self.0
-            .with_program(|p| KeyboardTarget::modifiers(&p.window, seat, data, modifiers, serial))
+        let p = self.p();
+        KeyboardTarget::modifiers(&p.window, seat, data, modifiers, serial)
     }
 }
 
 impl PointerTarget<State> for CosmicWindow {
-    fn enter(&self, seat: &Seat<State>, data: &mut State, event: &MotionEvent) {
-        let mut event = event.clone();
-        self.0.with_program(|p| {
-            let has_ssd = p.has_ssd(false);
-            if has_ssd || p.has_tiled_state() {
-                let Some(next) = Focus::under(
-                    &p.window,
-                    if has_ssd { SSD_HEIGHT } else { 0 },
-                    event.location,
-                ) else {
-                    return;
-                };
+    fn enter(&self, seat: &Seat<State>, _data: &mut State, event: &MotionEvent) {
+        let p = self.p();
+        let has_ssd = p.has_ssd(false);
+        if has_ssd || p.has_tiled_state() {
+            let Some(next) = Focus::under(
+                &p.window,
+                if has_ssd { SSD_HEIGHT } else { 0 },
+                event.location,
+            ) else {
+                return;
+            };
 
-                let old_focus = p.swap_focus(Some(next));
-                assert_eq!(old_focus, None);
+            let old_focus = p.swap_focus(Some(next));
+            assert_eq!(old_focus, None);
 
-                let cursor_state = seat.user_data().get::<CursorState>().unwrap();
-                cursor_state.lock().unwrap().set_shape(next.cursor_shape());
-                seat.set_cursor_image_status(CursorImageStatus::default_named());
-            }
-        });
-
-        event.location -= self.0.with_program(|p| p.window.geometry().loc.to_f64());
-        PointerTarget::enter(&self.0, seat, data, &event)
+            let cursor_state = seat.user_data().get::<CursorState>().unwrap();
+            cursor_state.lock().unwrap().set_shape(next.cursor_shape());
+            seat.set_cursor_image_status(CursorImageStatus::default_named());
+        }
     }
 
-    fn motion(&self, seat: &Seat<State>, data: &mut State, event: &MotionEvent) {
-        let mut event = event.clone();
-        self.0.with_program(|p| {
-            let has_ssd = p.has_ssd(false);
-            if has_ssd || p.has_tiled_state() {
-                let Some(next) = Focus::under(
-                    &p.window,
-                    if has_ssd { SSD_HEIGHT } else { 0 },
-                    event.location,
-                ) else {
-                    return;
-                };
-                let _previous = p.swap_focus(Some(next));
+    fn motion(&self, seat: &Seat<State>, _data: &mut State, event: &MotionEvent) {
+        let p = self.p();
+        let has_ssd = p.has_ssd(false);
+        if has_ssd || p.has_tiled_state() {
+            let Some(next) = Focus::under(
+                &p.window,
+                if has_ssd { SSD_HEIGHT } else { 0 },
+                event.location,
+            ) else {
+                return;
+            };
+            let _previous = p.swap_focus(Some(next));
 
-                let cursor_state = seat.user_data().get::<CursorState>().unwrap();
-                cursor_state.lock().unwrap().set_shape(next.cursor_shape());
-                seat.set_cursor_image_status(CursorImageStatus::default_named());
-            }
-        });
-
-        event.location -= self.0.with_program(|p| p.window.geometry().loc.to_f64());
-        PointerTarget::motion(&self.0, seat, data, &event)
+            let cursor_state = seat.user_data().get::<CursorState>().unwrap();
+            cursor_state.lock().unwrap().set_shape(next.cursor_shape());
+            seat.set_cursor_image_status(CursorImageStatus::default_named());
+        }
     }
 
     fn relative_motion(
@@ -1021,9 +854,103 @@ impl PointerTarget<State> for CosmicWindow {
     ) {
     }
 
-    fn button(&self, seat: &Seat<State>, data: &mut State, event: &ButtonEvent) {
-        match self.0.with_program(|p| p.current_focus()) {
-            Some(Focus::Header) => PointerTarget::button(&self.0, seat, data, event),
+    fn button(&self, seat: &Seat<State>, _data: &mut State, event: &ButtonEvent) {
+        let current_focus = self.p().current_focus();
+        match current_focus {
+            Some(Focus::Header) => {
+                // Left click: drag start
+                if event.state == smithay::backend::input::ButtonState::Pressed
+                    && event.button == 0x110
+                {
+                    let serial = event.serial;
+                    let seat = seat.clone();
+                    let surface = {
+                        let p = self.p();
+                        p.window.wl_surface().map(Cow::into_owned)
+                    };
+                    if let Some(surface) = surface {
+                        self.handle.insert_idle(move |state| {
+                            let res = state.common.shell.write().move_request(
+                                &surface,
+                                &seat,
+                                serial,
+                                ReleaseMode::NoMouseButtons,
+                                false,
+                                &state.common.config,
+                                &state.common.event_loop_handle,
+                                false,
+                            );
+                            if let Some((grab, focus)) = res {
+                                if grab.is_touch_grab() {
+                                    seat.get_touch().unwrap().set_grab(state, grab, serial);
+                                } else {
+                                    seat.get_pointer()
+                                        .unwrap()
+                                        .set_grab(state, grab, serial, focus);
+                                }
+                            }
+                        });
+                    }
+                }
+                // Right click: context menu
+                if event.state == smithay::backend::input::ButtonState::Pressed
+                    && event.button == 0x111
+                {
+                    let serial = event.serial;
+                    let seat = seat.clone();
+                    let surface = {
+                        let p = self.p();
+                        p.window.wl_surface().map(Cow::into_owned)
+                    };
+                    if let Some(surface) = surface {
+                        self.handle.insert_idle(move |state| {
+                            let shell = state.common.shell.read();
+                            if let Some(mapped) = shell.element_for_surface(&surface).cloned() {
+                                let position = if let Some((output, set)) =
+                                    shell.workspaces.sets.iter().find(|(_, set)| {
+                                        set.sticky_layer.mapped().any(|m| m == &mapped)
+                                    }) {
+                                    set.sticky_layer
+                                        .element_geometry(&mapped)
+                                        .unwrap()
+                                        .loc
+                                        .to_global(output)
+                                } else if let Some(workspace) = shell.space_for(&mapped) {
+                                    let Some(elem_geo) = workspace.element_geometry(&mapped) else {
+                                        return;
+                                    };
+                                    elem_geo.loc.to_global(&workspace.output)
+                                } else {
+                                    return;
+                                };
+
+                                let pointer = seat.get_pointer().unwrap();
+                                let mut cursor = pointer.current_location().to_i32_round();
+                                cursor.y -= SSD_HEIGHT;
+
+                                let res = shell.menu_request(
+                                    false,
+                                    &surface,
+                                    &seat,
+                                    serial,
+                                    cursor - position.as_logical(),
+                                    false,
+                                    &state.common.config,
+                                    &state.common.event_loop_handle,
+                                    &state.common.display_handle,
+                                    &mut state.common.shell_overlay_state,
+                                    &mut state.common.pending_menu_callbacks,
+                                );
+
+                                std::mem::drop(shell);
+                                if let Some((grab, focus)) = res {
+                                    pointer.set_grab(state, grab, serial, focus);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
             Some(x) => {
                 let serial = event.serial;
                 let seat = seat.clone();
@@ -1037,7 +964,7 @@ impl PointerTarget<State> for CosmicWindow {
                 {
                     return;
                 }
-                self.0.loop_handle().insert_idle(move |state| {
+                self.handle.insert_idle(move |state| {
                     let res = state.common.shell.write().resize_request(
                         &surface,
                         &seat,
@@ -1072,25 +999,19 @@ impl PointerTarget<State> for CosmicWindow {
         }
     }
 
-    fn axis(&self, seat: &Seat<State>, data: &mut State, frame: AxisFrame) {
-        if let Some(Focus::Header) = self.0.with_program(|p| p.current_focus()) {
-            PointerTarget::axis(&self.0, seat, data, frame)
-        }
+    fn axis(&self, _seat: &Seat<State>, _data: &mut State, _frame: AxisFrame) {
+        // No-op for header (Iced header scrolling removed).
     }
 
-    fn frame(&self, seat: &Seat<State>, data: &mut State) {
-        if let Some(Focus::Header) = self.0.with_program(|p| p.current_focus()) {
-            PointerTarget::frame(&self.0, seat, data)
-        }
+    fn frame(&self, _seat: &Seat<State>, _data: &mut State) {
+        // No-op for header.
     }
 
-    fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: u32) {
-        self.0.with_program(|p| {
-            let cursor_state = seat.user_data().get::<CursorState>().unwrap();
-            cursor_state.lock().unwrap().unset_shape();
-            let _previous = p.swap_focus(None);
-        });
-        PointerTarget::leave(&self.0, seat, data, serial, time)
+    fn leave(&self, seat: &Seat<State>, _data: &mut State, _serial: Serial, _time: u32) {
+        let p = self.p();
+        let cursor_state = seat.user_data().get::<CursorState>().unwrap();
+        cursor_state.lock().unwrap().unset_shape();
+        let _previous = p.swap_focus(None);
     }
 
     fn gesture_swipe_begin(
@@ -1159,34 +1080,30 @@ impl PointerTarget<State> for CosmicWindow {
 }
 
 impl TouchTarget<State> for CosmicWindow {
-    fn down(&self, seat: &Seat<State>, data: &mut State, event: &DownEvent, seq: Serial) {
-        let mut event = event.clone();
-        self.0.with_program(|p| {
-            event.location -= p.window.geometry().loc.to_f64();
-        });
-        TouchTarget::down(&self.0, seat, data, &event, seq)
+    fn down(&self, _seat: &Seat<State>, _data: &mut State, event: &DownEvent, _seq: Serial) {
+        let _adjusted_loc = {
+            let p = self.p();
+            event.location - p.window.geometry().loc.to_f64()
+        };
     }
 
-    fn up(&self, seat: &Seat<State>, data: &mut State, event: &UpEvent, seq: Serial) {
-        TouchTarget::up(&self.0, seat, data, event, seq)
+    fn up(&self, _seat: &Seat<State>, _data: &mut State, _event: &UpEvent, _seq: Serial) {
     }
 
-    fn motion(&self, seat: &Seat<State>, data: &mut State, event: &TouchMotionEvent, seq: Serial) {
-        let mut event = event.clone();
-        event.location -= self.0.with_program(|p| p.window.geometry().loc.to_f64());
-        TouchTarget::motion(&self.0, seat, data, &event, seq)
+    fn motion(&self, _seat: &Seat<State>, _data: &mut State, event: &TouchMotionEvent, _seq: Serial) {
+        let _adjusted_loc = {
+            let p = self.p();
+            event.location - p.window.geometry().loc.to_f64()
+        };
     }
 
-    fn frame(&self, seat: &Seat<State>, data: &mut State, seq: Serial) {
-        TouchTarget::frame(&self.0, seat, data, seq)
+    fn frame(&self, _seat: &Seat<State>, _data: &mut State, _seq: Serial) {
     }
 
-    fn cancel(&self, seat: &Seat<State>, data: &mut State, seq: Serial) {
-        TouchTarget::cancel(&self.0, seat, data, seq)
+    fn cancel(&self, _seat: &Seat<State>, _data: &mut State, _seq: Serial) {
     }
 
-    fn shape(&self, seat: &Seat<State>, data: &mut State, event: &ShapeEvent, seq: Serial) {
-        TouchTarget::shape(&self.0, seat, data, event, seq)
+    fn shape(&self, _seat: &Seat<State>, _data: &mut State, _event: &ShapeEvent, _seq: Serial) {
     }
 
     fn orientation(
@@ -1201,18 +1118,18 @@ impl TouchTarget<State> for CosmicWindow {
 
 impl WaylandFocus for CosmicWindow {
     fn wl_surface(&self) -> Option<Cow<'_, WlSurface>> {
-        self.0.with_program(|p| {
-            p.window
-                .wl_surface()
-                .map(|s| Cow::Owned(Cow::into_owned(s)))
-        })
+        let p = self.p();
+        p.window
+            .wl_surface()
+            .map(|s| Cow::Owned(Cow::into_owned(s)))
     }
 
     fn same_client_as(&self, object_id: &ObjectId) -> bool {
-        self.0.with_program(|p| p.window.same_client_as(object_id))
+        self.p().window.same_client_as(object_id)
     }
 }
 
+/// Render element variants for a CosmicWindow.
 pub enum CosmicWindowRenderElement<R: Renderer + ImportAll + ImportMem> {
     Header(MemoryRenderBufferRenderElement<R>),
     Shadow(PixelShaderElement),

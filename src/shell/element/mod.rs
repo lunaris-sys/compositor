@@ -1,7 +1,7 @@
 use crate::{
     backend::render::element::{AsGlowRenderer, FromGlesError},
     state::State,
-    utils::{iced::IcedElementInternal, prelude::*},
+    utils::prelude::*,
 };
 use calloop::LoopHandle;
 use cosmic_comp_config::AppearanceConfig;
@@ -126,7 +126,7 @@ impl fmt::Debug for CosmicMapped {
 pub struct CosmicMappedKey(CosmicMappedKeyInner);
 #[derive(Clone)]
 enum CosmicMappedKeyInner {
-    Window(Weak<Mutex<IcedElementInternal<CosmicWindowInternal>>>),
+    Window(Weak<Mutex<CosmicWindowInternal>>),
     Stack(Weak<Mutex<CosmicStackInternal>>),
 }
 
@@ -879,7 +879,7 @@ impl CosmicMapped {
                 CosmicMappedKeyInner::Stack(Arc::downgrade(&stack.inner))
             }
             CosmicMappedInternal::Window(window) => {
-                CosmicMappedKeyInner::Window(Arc::downgrade(&window.0.0))
+                CosmicMappedKeyInner::Window(Arc::downgrade(&window.inner))
             }
             _ => unreachable!(),
         })

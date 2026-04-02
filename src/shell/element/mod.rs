@@ -127,7 +127,7 @@ pub struct CosmicMappedKey(CosmicMappedKeyInner);
 #[derive(Clone)]
 enum CosmicMappedKeyInner {
     Window(Weak<Mutex<IcedElementInternal<CosmicWindowInternal>>>),
-    Stack(Weak<Mutex<IcedElementInternal<CosmicStackInternal>>>),
+    Stack(Weak<Mutex<CosmicStackInternal>>),
 }
 
 impl Hash for CosmicMappedKey {
@@ -876,7 +876,7 @@ impl CosmicMapped {
     pub fn key(&self) -> CosmicMappedKey {
         CosmicMappedKey(match &self.element {
             CosmicMappedInternal::Stack(stack) => {
-                CosmicMappedKeyInner::Stack(Arc::downgrade(&stack.0.0))
+                CosmicMappedKeyInner::Stack(Arc::downgrade(&stack.inner))
             }
             CosmicMappedInternal::Window(window) => {
                 CosmicMappedKeyInner::Window(Arc::downgrade(&window.0.0))

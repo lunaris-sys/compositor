@@ -824,7 +824,8 @@ where
     render_input_order::<()>(&shell, output, previous, current, element_filter, |stage| {
         match stage {
             Stage::ZoomUI => {
-                elements.extend(ZoomState::render(renderer, output));
+                // Zoom toolbar rendering is now handled by desktop-shell
+                // via the shell overlay protocol.
             }
             Stage::SessionLock(lock_surface) => {
                 elements.extend(

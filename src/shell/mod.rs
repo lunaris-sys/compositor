@@ -95,6 +95,14 @@ pub use self::seats::*;
 pub use self::workspace::*;
 use self::zoom::{OutputZoomState, ZoomState};
 
+/// Protocol events queued by Shell, drained by Common::refresh().
+#[derive(Debug)]
+pub(crate) enum ZoomProtocolEvent {
+    Show { level: f64, increment: u32, movement: u32 },
+    Update { level: f64 },
+    Hide,
+}
+
 use self::{
     element::{
         CosmicWindow, MaximizedState,
@@ -290,6 +298,7 @@ pub struct Shell {
     resize_indicator: Option<ResizeIndicator>,
     /// Indicator kinds to hide, drained by `Common::refresh()`.
     pub(crate) pending_indicator_hides: Vec<u32>,
+    pub(crate) pending_zoom_event: Option<ZoomProtocolEvent>,
     zoom_state: Option<ZoomState>,
     appearance_conf: AppearanceConfig,
     tiling_exceptions: TilingExceptions,
@@ -1438,8 +1447,6 @@ impl Common {
                     1.0,
                     state.increment,
                     state.movement,
-                    self.event_loop_handle.clone(),
-                    shell.theme.clone(),
                 ))
             });
         }
@@ -1505,6 +1512,19 @@ impl Common {
             );
             for kind in shell.pending_indicator_hides.drain(..) {
                 self.shell_overlay_state.send_indicator_hide(kind);
+            }
+            if let Some(event) = shell.pending_zoom_event.take() {
+                match event {
+                    ZoomProtocolEvent::Show { level, increment, movement } => {
+                        self.shell_overlay_state.send_zoom_toolbar_show(level, increment, movement);
+                    }
+                    ZoomProtocolEvent::Update { level } => {
+                        self.shell_overlay_state.send_zoom_toolbar_update(level);
+                    }
+                    ZoomProtocolEvent::Hide => {
+                        self.shell_overlay_state.send_zoom_toolbar_hide();
+                    }
+                }
             }
         }
         self.popups.cleanup();
@@ -1608,6 +1628,7 @@ impl Shell {
             resize_state: None,
             resize_indicator: None,
             pending_indicator_hides: Vec::new(),
+            pending_zoom_event: None,
             appearance_conf: config.cosmic_conf.appearance_settings,
             zoom_state: None,
             tiling_exceptions,
@@ -2371,8 +2392,6 @@ impl Shell {
                         1.0,
                         zoom_config.increment,
                         zoom_config.view_moves,
-                        loop_handle.clone(),
-                        self.theme.clone(),
                     ))
                 });
             }
@@ -2412,6 +2431,17 @@ impl Shell {
                 state.common.a11y_state.set_screen_magnifier(value);
             });
         }
+
+        let movement_u32 = match zoom_config.view_moves {
+            ZoomMovement::Continuously => 1,
+            ZoomMovement::OnEdge => 2,
+            ZoomMovement::Centered => 3,
+        };
+        self.pending_zoom_event = Some(ZoomProtocolEvent::Show {
+            level,
+            increment: zoom_config.increment,
+            movement: movement_u32,
+        });
 
         self.zoom_state = Some(ZoomState {
             seat: seat.clone(),
@@ -2503,6 +2533,7 @@ impl Shell {
 
             if all_outputs_off {
                 self.zoom_state.take();
+                self.pending_zoom_event = Some(ZoomProtocolEvent::Hide);
             }
         }
 

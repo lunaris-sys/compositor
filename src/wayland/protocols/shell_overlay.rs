@@ -241,6 +241,33 @@ impl ShellOverlayState {
     }
 }
 
+// ===== Zoom toolbar methods =====
+
+impl ShellOverlayState {
+    /// Notify connected shells to show the zoom toolbar.
+    pub fn send_zoom_toolbar_show(&self, level: f64, increment: u32, movement: u32) {
+        let movement_enum = lunaris_shell_overlay_v1::ZoomMovement::try_from(movement);
+        let Ok(movement_enum) = movement_enum else { return };
+        for instance in &self.instances {
+            instance.zoom_toolbar_show(level, increment, movement_enum);
+        }
+    }
+
+    /// Notify connected shells that the zoom level changed.
+    pub fn send_zoom_toolbar_update(&self, level: f64) {
+        for instance in &self.instances {
+            instance.zoom_toolbar_update(level);
+        }
+    }
+
+    /// Notify connected shells to hide the zoom toolbar.
+    pub fn send_zoom_toolbar_hide(&self) {
+        for instance in &self.instances {
+            instance.zoom_toolbar_hide();
+        }
+    }
+}
+
 // ===== Menu item types =====
 
 /// A window management action that can appear as a context menu entry.
@@ -351,6 +378,17 @@ pub trait ShellOverlayHandler {
 
     /// Called when the shell activates a tab in a stack.
     fn tab_activate(&mut self, stack_id: u32, index: u32);
+
+    /// Called when the shell requests a zoom increase.
+    fn zoom_increase(&mut self);
+    /// Called when the shell requests a zoom decrease.
+    fn zoom_decrease(&mut self);
+    /// Called when the shell requests zoom close (deactivate overlay).
+    fn zoom_close(&mut self);
+    /// Called when the shell selects a zoom increment.
+    fn zoom_set_increment(&mut self, value: u32);
+    /// Called when the shell selects a viewport movement mode.
+    fn zoom_set_movement(&mut self, mode: u32);
 }
 
 // ===== GlobalDispatch =====
@@ -404,6 +442,25 @@ where
             }
             OverlayRequest::TabActivate { stack_id, index } => {
                 state.tab_activate(stack_id, index);
+            }
+            OverlayRequest::ZoomIncrease => {
+                state.zoom_increase();
+            }
+            OverlayRequest::ZoomDecrease => {
+                state.zoom_decrease();
+            }
+            OverlayRequest::ZoomClose => {
+                state.zoom_close();
+            }
+            OverlayRequest::ZoomSetIncrement { value } => {
+                state.zoom_set_increment(value);
+            }
+            OverlayRequest::ZoomSetMovement { mode } => {
+                let mode_u32 = match mode {
+                    smithay::reexports::wayland_server::WEnum::Value(v) => v as u32,
+                    smithay::reexports::wayland_server::WEnum::Unknown(v) => v,
+                };
+                state.zoom_set_movement(mode_u32);
             }
         }
     }

@@ -52,6 +52,38 @@ impl ShellOverlayHandler for State {
         unset_overlay_grab(self, menu_id);
     }
 
+    fn zoom_increase(&mut self) {
+        let seat = self.common.shell.read().seats.last_active().clone();
+        self.update_zoom(&seat, self.common.config.cosmic_conf.accessibility_zoom.increment as f64 / 100.0, true);
+    }
+
+    fn zoom_decrease(&mut self) {
+        let seat = self.common.shell.read().seats.last_active().clone();
+        self.update_zoom(&seat, -(self.common.config.cosmic_conf.accessibility_zoom.increment as f64 / 100.0), true);
+    }
+
+    fn zoom_close(&mut self) {
+        self.common.config.cosmic_conf.accessibility_zoom.show_overlay = false;
+        self.common.update_config();
+    }
+
+    fn zoom_set_increment(&mut self, value: u32) {
+        self.common.config.cosmic_conf.accessibility_zoom.increment = value;
+        self.common.update_config();
+    }
+
+    fn zoom_set_movement(&mut self, mode: u32) {
+        use cosmic_comp_config::ZoomMovement;
+        let movement = match mode {
+            1 => ZoomMovement::Continuously,
+            2 => ZoomMovement::OnEdge,
+            3 => ZoomMovement::Centered,
+            _ => return,
+        };
+        self.common.config.cosmic_conf.accessibility_zoom.view_moves = movement;
+        self.common.update_config();
+    }
+
     fn tab_activate(&mut self, stack_id: u32, index: u32) {
         let found = {
             let shell = self.common.shell.read();

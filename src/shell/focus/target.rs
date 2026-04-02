@@ -9,7 +9,6 @@ use crate::{
         CosmicSurface, SeatExt,
         element::{CosmicMapped, CosmicStack, CosmicWindow},
         layout::tiling::ResizeForkTarget,
-        zoom::ZoomFocusTarget,
     },
     utils::prelude::*,
     wayland::handlers::{image_copy_capture::SessionHolder, xdg_shell::popup::get_popup_toplevel},
@@ -57,7 +56,6 @@ pub enum PointerFocusTarget {
     StackUI(CosmicStack),
     WindowUI(CosmicWindow),
     ResizeFork(ResizeForkTarget),
-    ZoomUI(ZoomFocusTarget),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,7 +143,6 @@ impl PointerFocusTarget {
             PointerFocusTarget::StackUI(u) => u,
             PointerFocusTarget::WindowUI(u) => u,
             PointerFocusTarget::ResizeFork(f) => f,
-            PointerFocusTarget::ZoomUI(e) => e,
         }
     }
 
@@ -156,7 +153,6 @@ impl PointerFocusTarget {
             PointerFocusTarget::StackUI(u) => u,
             PointerFocusTarget::WindowUI(u) => u,
             PointerFocusTarget::ResizeFork(f) => f,
-            PointerFocusTarget::ZoomUI(e) => e,
         }
     }
 
@@ -304,7 +300,6 @@ impl IsAlive for PointerFocusTarget {
             PointerFocusTarget::StackUI(e) => e.alive(),
             PointerFocusTarget::WindowUI(e) => e.alive(),
             PointerFocusTarget::ResizeFork(f) => f.alive(),
-            PointerFocusTarget::ZoomUI(_) => true,
         }
     }
 }
@@ -732,7 +727,7 @@ impl WaylandFocus for PointerFocusTarget {
             PointerFocusTarget::ResizeFork(_)
             | PointerFocusTarget::StackUI(_)
             | PointerFocusTarget::WindowUI(_)
-            | PointerFocusTarget::ZoomUI(_) => {
+            => {
                 return None;
             }
         })
@@ -750,7 +745,7 @@ impl WaylandFocus for PointerFocusTarget {
             PointerFocusTarget::WindowUI(window) => window
                 .wl_surface()
                 .is_some_and(|s| s.id().same_client_as(object_id)),
-            PointerFocusTarget::ResizeFork(_) | PointerFocusTarget::ZoomUI(_) => false,
+            PointerFocusTarget::ResizeFork(_) => false,
         }
     }
 }

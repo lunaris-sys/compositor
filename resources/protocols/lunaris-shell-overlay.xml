@@ -184,6 +184,60 @@
       <arg name="kind" type="uint" enum="indicator_kind" summary="indicator type to hide"/>
     </event>
 
+    <!-- ===== Zoom Toolbar ===== -->
+
+    <enum name="zoom_movement">
+      <description summary="zoom viewport movement mode"/>
+      <entry name="continuously" value="1" summary="viewport follows cursor continuously"/>
+      <entry name="on_edge"      value="2" summary="viewport pans when cursor reaches edge"/>
+      <entry name="centered"     value="3" summary="viewport centers on cursor"/>
+    </enum>
+
+    <event name="zoom_toolbar_show">
+      <description summary="show the zoom toolbar">
+        Sent when accessibility zoom is activated. The shell should render
+        a toolbar showing the current zoom level and controls.
+      </description>
+      <arg name="level" type="fixed" summary="current zoom level (1.0 = no zoom)"/>
+      <arg name="increment" type="uint" summary="zoom step percentage (e.g. 25 = 25%)"/>
+      <arg name="movement" type="uint" enum="zoom_movement" summary="viewport movement mode"/>
+    </event>
+
+    <event name="zoom_toolbar_update">
+      <description summary="update the zoom level display">
+        Sent when the zoom level changes while the toolbar is visible.
+      </description>
+      <arg name="level" type="fixed" summary="new zoom level"/>
+    </event>
+
+    <event name="zoom_toolbar_hide">
+      <description summary="hide the zoom toolbar">
+        Sent when zoom is deactivated (level returns to 1.0).
+      </description>
+    </event>
+
+    <request name="zoom_increase">
+      <description summary="user pressed zoom in"/>
+    </request>
+
+    <request name="zoom_decrease">
+      <description summary="user pressed zoom out"/>
+    </request>
+
+    <request name="zoom_close">
+      <description summary="user pressed close on zoom toolbar"/>
+    </request>
+
+    <request name="zoom_set_increment">
+      <description summary="user selected a zoom increment"/>
+      <arg name="value" type="uint" summary="increment percentage"/>
+    </request>
+
+    <request name="zoom_set_movement">
+      <description summary="user selected a viewport movement mode"/>
+      <arg name="mode" type="uint" enum="zoom_movement" summary="new movement mode"/>
+    </request>
+
     <!-- ===== Window Actions Enum ===== -->
 
     <enum name="window_action">

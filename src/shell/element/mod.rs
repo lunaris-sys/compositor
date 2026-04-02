@@ -497,7 +497,6 @@ impl CosmicMapped {
     pub fn convert_to_stack(
         &mut self,
         (output, overlap): (&Output, Rectangle<i32, Logical>),
-        theme: cosmic::Theme,
         appearance: AppearanceConfig,
     ) {
         if let CosmicMappedInternal::Window(window) = &self.element {
@@ -505,7 +504,7 @@ impl CosmicMapped {
             let activated = surface.is_activated(true);
             let handle = window.loop_handle();
 
-            let stack = CosmicStack::new(std::iter::once(surface), handle, theme, appearance);
+            let stack = CosmicStack::new(std::iter::once(surface), handle, appearance);
             if let Some(geo) = *self.last_geometry.lock().unwrap() {
                 stack.set_geometry(geo.to_global(output));
             }
@@ -522,13 +521,12 @@ impl CosmicMapped {
         &mut self,
         surface: CosmicSurface,
         (output, overlap): (&Output, Rectangle<i32, Logical>),
-        theme: cosmic::Theme,
         appearance: AppearanceConfig,
     ) {
         let handle = self.loop_handle();
         surface.try_force_undecorated(false);
         surface.set_tiled(false);
-        let window = CosmicWindow::new(surface, handle, theme, appearance);
+        let window = CosmicWindow::new(surface, handle, appearance);
 
         if let Some(geo) = *self.last_geometry.lock().unwrap() {
             window.set_geometry(geo.to_global(output));
@@ -847,14 +845,6 @@ impl CosmicMapped {
         });
 
         elements.into_iter().map(C::from).collect()
-    }
-
-    pub(crate) fn update_theme(&self, theme: cosmic::Theme) {
-        match &self.element {
-            CosmicMappedInternal::Window(w) => w.set_theme(theme),
-            CosmicMappedInternal::Stack(s) => s.set_theme(theme),
-            CosmicMappedInternal::_GenericCatcher(_) => {}
-        }
     }
 
     pub(crate) fn update_appearance_conf(&self, appearance: &AppearanceConfig) {

@@ -9,9 +9,8 @@ use crate::{
     },
 };
 use anyhow::Context;
-// cosmic_config is still needed for CosmicTk watcher, Shortcuts, WindowRules,
+// cosmic_config is still needed for Shortcuts, WindowRules,
 // and the legacy cosmic_helper write-back used by zoom.rs.
-use cosmic_config::CosmicConfigEntry;
 use cosmic_settings_config::window_rules::ApplicationException;
 use cosmic_settings_config::{Shortcuts, shortcuts, window_rules};
 use serde::{Deserialize, Serialize};
@@ -44,7 +43,6 @@ mod input_config;
 pub mod key_bindings;
 mod types;
 
-use cosmic::config::CosmicTk;
 pub use cosmic_comp_config::EdidProduct;
 use cosmic_comp_config::{
     CosmicCompConfig, XkbConfig,
@@ -250,60 +248,6 @@ impl Config {
             // Leak the watcher so it stays alive for the process lifetime.
             // Same pattern as theme.rs (std::mem::forget on watchers).
             std::mem::forget(watcher);
-        }
-
-        // Listen for updates to the toolkit config
-        if let Ok(tk_config) = cosmic_config::Config::new("com.system76.CosmicTk", 1) {
-            fn handle_new_toolkit_config(config: CosmicTk, state: &mut State) {
-                if cosmic::icon_theme::default() != config.icon_theme {
-                    cosmic::icon_theme::set_default(config.icon_theme.clone());
-                    state.common.update_xwayland_settings();
-                }
-
-                let mut workspace_guard = state.common.workspace_state.update();
-                state.common.shell.write().update_toolkit(
-                    config,
-                    &state.common.xdg_activation_state,
-                    &mut workspace_guard,
-                );
-            }
-
-            let config = CosmicTk::get_entry(&tk_config).unwrap_or_else(|(errs, c)| {
-                if cfg!(debug_assertions) {
-                    for err in errs {
-                        warn!(?err, "");
-                    }
-                }
-                c
-            });
-            let _ = loop_handle.insert_idle(move |state| {
-                handle_new_toolkit_config(config, state);
-            });
-
-            match cosmic_config::calloop::ConfigWatchSource::new(&tk_config) {
-                Ok(source) => {
-                    if let Err(err) =
-                        loop_handle.insert_source(source, |(config, _keys), (), state| {
-                            let config =
-                                CosmicTk::get_entry(&config).unwrap_or_else(|(errs, c)| {
-                                    if cfg!(debug_assertions) {
-                                        for err in errs {
-                                            warn!(?err, "");
-                                        }
-                                    }
-                                    c
-                                });
-                            handle_new_toolkit_config(config, state);
-                        })
-                    {
-                        warn!(?err, "Failed to watch com.system76.CosmicTk config");
-                    }
-                }
-                Err(err) => warn!(
-                    ?err,
-                    "failed to create config watch source for com.system76.CosmicTk"
-                ),
-            }
         }
 
         // Source key bindings from com.system76.CosmicSettings.Shortcuts

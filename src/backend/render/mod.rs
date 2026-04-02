@@ -41,7 +41,6 @@ use crate::{
     },
 };
 
-use cosmic::Theme;
 use element::FromGlesError;
 use smithay::{
     backend::{
@@ -470,7 +469,6 @@ pub fn cursor_elements<'a, 'frame, R>(
     renderer: &mut R,
     seats: impl Iterator<Item = &'a Seat<State>>,
     zoom_state: Option<&ZoomState>,
-    theme: &Theme,
     lt: &lunaris_theme::LunarisTheme,
     now: Time<Monotonic>,
     output: &Output,
@@ -542,7 +540,6 @@ where
             );
         }
 
-        let theme = theme.cosmic();
         if let Some(grab_elements) = seat
             .user_data()
             .get::<SeatMoveGrabState>()
@@ -550,7 +547,7 @@ where
             .lock()
             .unwrap()
             .as_ref()
-            .map(|state| state.render::<CosmicMappedRenderElement<R>, R>(renderer, output, theme, lt))
+            .map(|state| state.render::<CosmicMappedRenderElement<R>, R>(renderer, output, lt))
         {
             elements.extend(grab_elements.into_iter().map(|elem| {
                 CosmicElement::MoveGrab(RescaleRenderElement::from_element(
@@ -729,7 +726,6 @@ where
     if seats.is_empty() {
         return Ok(Vec::new());
     }
-    let theme = shell_ref.theme().clone();
     let scale = output.current_scale().fractional_scale();
     // we don't want to hold a shell lock across `cursor_elements`,
     // that is prone to deadlock with the main-thread on some grabs.
@@ -741,7 +737,6 @@ where
             renderer,
             seats.iter(),
             zoom_level,
-            &theme,
             lt,
             now,
             output,
@@ -956,7 +951,6 @@ where
                             resize_indicator.clone(),
                             active_hint,
                             alpha,
-                            theme.cosmic(),
                         )
                         .into_iter()
                         .map(Into::into)
@@ -971,7 +965,6 @@ where
                         last_active_seat,
                         !move_active && is_active_space,
                         overview.clone(),
-                        theme.cosmic(),
                     ) {
                         Ok(elements) => {
                             elements
@@ -1000,7 +993,6 @@ where
                         overview.clone(),
                         resize_indicator.clone(),
                         active_hint,
-                        theme.cosmic(),
                     ) {
                         Ok(elements) => {
                             elements

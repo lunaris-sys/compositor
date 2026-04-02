@@ -82,7 +82,6 @@ pub fn resize_indicator(
     direction: ResizeDirection,
     config: &crate::config::Config,
     evlh: LoopHandle<'static, crate::state::State>,
-    _theme: cosmic::Theme,
 ) -> ResizeIndicator {
     use cosmic_settings_config::shortcuts::action::Action;
     ResizeIndicator {

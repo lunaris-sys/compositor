@@ -49,7 +49,6 @@ i18n-embed = { version = "0.16", features = [
 i18n-embed-fl = "0.10"
 indexmap = "2.13"
 keyframe = "1.1.1"
-libcosmic = { git = "https://github.com/pop-os/libcosmic", default-features = false }
 libsystemd = { version = "0.7", optional = true }
 log-panics = { version = "2", features = ["with-backtrace"] }
 png = "0.18"

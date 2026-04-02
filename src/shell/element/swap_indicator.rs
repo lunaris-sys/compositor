@@ -60,7 +60,6 @@ impl Hash for SwapIndicator {
 /// Creates a new [`SwapIndicator`].
 pub fn swap_indicator(
     _evlh: calloop::LoopHandle<'static, crate::state::State>,
-    _theme: cosmic::Theme,
 ) -> SwapIndicator {
     SwapIndicator {
         inner: Arc::new(Mutex::new(SwapIndicatorInternal {

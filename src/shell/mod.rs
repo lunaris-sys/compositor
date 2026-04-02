@@ -281,7 +281,6 @@ pub struct Shell {
     pub previous_workspace_idx: Option<(Serial, WeakOutput, usize)>,
     pub xwayland_keyboard_grab: Option<XWaylandKeyboardGrab<State>>,
 
-    theme: cosmic::Theme,
     pub active_hint: bool,
     pub lunaris_theme: lunaris_theme::LunarisTheme,
     overview_mode: OverviewMode,
@@ -370,7 +369,6 @@ pub struct WorkspaceSet {
     pub group: WorkspaceGroupHandle,
     tiling_enabled: bool,
     output: Output,
-    theme: cosmic::Theme,
     appearance: AppearanceConfig,
     pub sticky_layer: FloatingLayout,
     pub minimized_windows: Vec<MinimizedWindow>,
@@ -383,7 +381,6 @@ fn create_workspace(
     group_handle: &WorkspaceGroupHandle,
     active: bool,
     tiling: bool,
-    theme: cosmic::Theme,
     appearance: AppearanceConfig,
 ) -> Workspace {
     let workspace_handle = state
@@ -412,7 +409,6 @@ fn create_workspace(
         workspace_handle,
         output.clone(),
         tiling,
-        theme.clone(),
         appearance,
     )
 }
@@ -423,7 +419,6 @@ fn create_workspace_from_pinned(
     output: &Output,
     group_handle: &WorkspaceGroupHandle,
     active: bool,
-    theme: cosmic::Theme,
     appearance: AppearanceConfig,
 ) -> Workspace {
     let workspace_handle = state
@@ -452,7 +447,6 @@ fn create_workspace_from_pinned(
         pinned,
         workspace_handle,
         output.clone(),
-        theme.clone(),
         appearance,
     )
 }
@@ -488,18 +482,16 @@ impl WorkspaceSet {
         state: &mut WorkspaceUpdateGuard<'_, State>,
         output: &Output,
         tiling_enabled: bool,
-        theme: &cosmic::Theme,
         appearance: AppearanceConfig,
     ) -> WorkspaceSet {
         let group_handle = state.create_workspace_group();
-        let sticky_layer = FloatingLayout::new(theme.clone(), appearance, output);
+        let sticky_layer = FloatingLayout::new(appearance, output);
 
         WorkspaceSet {
             previously_active: None,
             active: 0,
             group: group_handle,
             tiling_enabled,
-            theme: theme.clone(),
             sticky_layer,
             minimized_windows: Vec::new(),
             workspaces: Vec::new(),
@@ -621,7 +613,6 @@ impl WorkspaceSet {
             &self.group,
             false,
             self.tiling_enabled,
-            self.theme.clone(),
             self.appearance,
         );
         workspace_set_idx(
@@ -750,14 +741,13 @@ pub struct Workspaces {
     mode: WorkspaceMode,
     autotile: bool,
     autotile_behavior: TileBehavior,
-    theme: cosmic::Theme,
     appearance: AppearanceConfig,
     // Persisted workspace to add on first `output_add`
     persisted_workspaces: Vec<PinnedWorkspace>,
 }
 
 impl Workspaces {
-    pub fn new(config: &Config, theme: cosmic::Theme) -> Workspaces {
+    pub fn new(config: &Config) -> Workspaces {
         Workspaces {
             sets: IndexMap::new(),
             backup_set: None,
@@ -765,7 +755,6 @@ impl Workspaces {
             mode: config.cosmic_conf.workspaces.workspace_mode,
             autotile: config.cosmic_conf.autotile,
             autotile_behavior: config.cosmic_conf.autotile_behavior,
-            theme,
             appearance: config.cosmic_conf.appearance_settings,
             persisted_workspaces: config.cosmic_conf.pinned_workspaces.clone(),
         }
@@ -792,7 +781,6 @@ impl Workspaces {
                     workspace_state,
                     output,
                     self.autotile,
-                    &self.theme,
                     self.appearance,
                 )
             });
@@ -806,7 +794,6 @@ impl Workspaces {
                 output,
                 &set.group,
                 false,
-                self.theme.clone(),
                 self.appearance,
             );
             set.workspaces.push(workspace);
@@ -1140,7 +1127,6 @@ impl Workspaces {
                                     &set.group,
                                     false,
                                     config.cosmic_conf.autotile,
-                                    self.theme.clone(),
                                     self.appearance,
                                 ),
                             );
@@ -1329,25 +1315,7 @@ impl Workspaces {
         )
     }
 
-    pub fn set_theme(&mut self, theme: cosmic::Theme) {
-        for (_, s) in &mut self.sets {
-            s.theme = theme.clone();
-
-            s.sticky_layer.theme = theme.clone();
-            s.sticky_layer.mapped().for_each(|m| {
-                m.update_theme(theme.clone());
-            });
-
-            for w in &mut s.workspaces {
-                w.tiling_layer.theme = theme.clone();
-                w.floating_layer.theme = theme.clone();
-
-                w.mapped().for_each(|m| {
-                    m.update_theme(theme.clone());
-                });
-            }
-        }
-
+    pub fn set_theme(&mut self) {
         self.force_redraw();
     }
 
@@ -1603,12 +1571,10 @@ impl Common {
 
 impl Shell {
     pub fn new(config: &Config) -> Self {
-        let theme = cosmic::theme::system_preference();
-
         let tiling_exceptions = layout::TilingExceptions::new(config.tiling_exceptions.iter());
 
         Shell {
-            workspaces: Workspaces::new(config, theme.clone()),
+            workspaces: Workspaces::new(config),
             seats: Seats::new(),
 
             pending_windows: Vec::new(),
@@ -1619,7 +1585,6 @@ impl Shell {
             previous_workspace_idx: None,
             xwayland_keyboard_grab: None,
 
-            theme,
             active_hint: config.cosmic_conf.active_hint,
             lunaris_theme: lunaris_theme::LunarisTheme::load(),
             overview_mode: OverviewMode::None,
@@ -2227,7 +2192,7 @@ impl Shell {
                 OverviewMode::Started(_, _) | OverviewMode::Active(_)
             ) {
                 if matches!(trigger, Trigger::KeyboardSwap(_, _)) {
-                    self.swap_indicator = Some(swap_indicator(evlh.clone(), self.theme.clone()));
+                    self.swap_indicator = Some(swap_indicator(evlh.clone()));
                     evlh.insert_idle(|state| {
                         state.common.shell_overlay_state.send_indicator_show(
                             2, 0, 0, String::new(), String::new(),
@@ -2317,7 +2282,6 @@ impl Shell {
                 direction,
                 config,
                 evlh,
-                self.theme.clone(),
             ));
         } else if let Some(direction) = self.resize_mode.active_direction() {
             self.resize_mode = ResizeMode::Ended(Instant::now(), direction);
@@ -2586,7 +2550,6 @@ impl Shell {
         let window = CosmicMapped::from(CosmicWindow::new(
             surface,
             loop_handle.clone(),
-            self.theme.clone(),
             self.appearance_conf,
         ));
 
@@ -2864,7 +2827,6 @@ impl Shell {
         let mapped = CosmicMapped::from(CosmicWindow::new(
             window.clone(),
             loop_handle.clone(),
-            self.theme.clone(),
             self.appearance_conf,
         ));
         #[cfg(feature = "debug")]
@@ -3250,7 +3212,6 @@ impl Shell {
                     let window = CosmicMapped::from(CosmicWindow::new(
                         window.clone(),
                         evlh.clone(),
-                        self.theme.clone(),
                         self.appearance_conf,
                     ));
                     window.set_minimized(true);
@@ -3260,7 +3221,6 @@ impl Shell {
                     let window = CosmicMapped::from(CosmicWindow::new(
                         window.clone(),
                         evlh.clone(),
-                        self.theme.clone(),
                         self.appearance_conf,
                     ));
                     window.set_minimized(true);
@@ -3319,7 +3279,6 @@ impl Shell {
                 let mapped = CosmicMapped::from(CosmicWindow::new(
                     window.clone(),
                     evlh.clone(),
-                    self.theme.clone(),
                     self.appearance_conf,
                 ));
                 let position = match window_state {
@@ -3336,7 +3295,6 @@ impl Shell {
                 let mapped = CosmicMapped::from(CosmicWindow::new(
                     window.clone(),
                     evlh.clone(),
-                    self.theme.clone(),
                     self.appearance_conf,
                 ));
                 for mapped in to_workspace
@@ -3738,7 +3696,6 @@ impl Shell {
             MenuAlignment::CORNER,
             None,
             evlh.clone(),
-            self.theme.clone(),
             menu_id,
             shell_focus,
         );
@@ -3807,7 +3764,6 @@ impl Shell {
             let new_mapped: CosmicMapped = CosmicWindow::new(
                 window.clone(),
                 evlh.clone(),
-                self.theme.clone(),
                 self.appearance_conf,
             )
             .into();
@@ -4199,10 +4155,8 @@ impl Shell {
                         direction,
                         seat,
                         ManagedLayer::Sticky,
-                        self.theme.clone(),
                     )
                 } else {
-                    let theme = self.theme.clone();
                     if mapped
                         .maximized_state
                         .lock()
@@ -4216,7 +4170,7 @@ impl Shell {
                     let workspace = self.active_space_mut(&output).unwrap();
                     workspace
                         .floating_layer
-                        .move_current_element(direction, seat, ManagedLayer::Floating, theme)
+                        .move_current_element(direction, seat, ManagedLayer::Floating)
                         .or_else(|| workspace.tiling_layer.move_current_node(direction, seat))
                 }
             }
@@ -4988,34 +4942,13 @@ impl Shell {
         }
     }
 
-    pub fn update_toolkit(
-        &mut self,
-        toolkit: cosmic::config::CosmicTk,
-        xdg_activation_state: &XdgActivationState,
-        workspace_state: &mut WorkspaceUpdateGuard<'_, State>,
-    ) {
-        let mut container = cosmic::config::COSMIC_TK.write().unwrap();
-        if *container != toolkit {
-            *container = toolkit;
-            drop(container);
-            self.refresh(xdg_activation_state, workspace_state);
-            self.workspaces.force_redraw();
-        }
-    }
-
     pub fn set_theme(
         &mut self,
-        theme: cosmic::Theme,
         xdg_activation_state: &XdgActivationState,
         workspace_state: &mut WorkspaceUpdateGuard<'_, State>,
     ) {
-        self.theme = theme.clone();
         self.refresh(xdg_activation_state, workspace_state);
-        self.workspaces.set_theme(theme.clone());
-    }
-
-    pub fn theme(&self) -> &cosmic::Theme {
-        &self.theme
+        self.workspaces.set_theme();
     }
 
     pub fn update_tiling_exceptions<'a, I>(&mut self, exceptions: I)

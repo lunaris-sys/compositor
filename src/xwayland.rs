@@ -710,7 +710,7 @@ impl Common {
             if xwayland
                 .xrdb_thread
                 .send((
-                    cosmic::icon_theme::default(),
+                    String::from("hicolor"),
                     (new_scale * cursor_size as f64).round() as u32,
                 ))
                 .is_err()

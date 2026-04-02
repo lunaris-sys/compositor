@@ -113,7 +113,6 @@ pub struct CosmicWindowInternal {
     pointer_entered: AtomicU8,
     last_title: Mutex<String>,
     tiled: AtomicBool,
-    pub(crate) theme: Mutex<cosmic::Theme>,
     appearance_conf: Mutex<AppearanceConfig>,
 }
 
@@ -221,7 +220,6 @@ impl CosmicWindow {
     pub fn new(
         window: impl Into<CosmicSurface>,
         handle: LoopHandle<'static, crate::state::State>,
-        theme: cosmic::Theme,
         appearance: AppearanceConfig,
     ) -> CosmicWindow {
         let window = window.into();
@@ -237,7 +235,6 @@ impl CosmicWindow {
                 pointer_entered: AtomicU8::new(0),
                 last_title: Mutex::new(String::new()),
                 tiled: AtomicBool::new(false),
-                theme: Mutex::new(theme),
                 appearance_conf: Mutex::new(appearance),
             })),
             handle,
@@ -399,7 +396,6 @@ impl CosmicWindow {
         let is_tiled = p.is_tiled();
         let activated = p.window.is_activated(false);
         let appearance = p.appearance_conf.lock().unwrap();
-        let theme = p.theme.lock().unwrap();
 
         if p.window.is_maximized(false) {
             return None;
@@ -442,9 +438,7 @@ impl CosmicWindow {
             geo.size = geo.size.clamp(Size::default(), max_size.to_f64());
         }
 
-        let _theme = theme; // keep borrow alive until here
         let _appearance = appearance;
-        drop(_theme);
         drop(_appearance);
 
         let window_key =
@@ -514,12 +508,9 @@ impl CosmicWindow {
 
         let mut elements = Vec::new();
 
-        let (mut geo, bg_divider) = {
+        let mut geo = {
             let p = self.p();
-            (
-                SpaceElement::geometry(&p.window).to_f64(),
-                p.theme.lock().unwrap().cosmic().bg_divider(),
-            )
+            SpaceElement::geometry(&p.window).to_f64()
         };
         geo.loc += location.to_f64().to_logical(scale);
         if has_ssd {
@@ -533,7 +524,8 @@ impl CosmicWindow {
             let window_key =
                 CosmicMappedKey(CosmicMappedKeyInner::Window(Arc::downgrade(&self.inner)));
 
-            let (r, g, b, a) = bg_divider.into_components();
+            let border_color = crate::theme::lunaris_theme().border;
+            let [r, g, b, a] = border_color;
             let elem = CosmicWindowRenderElement::Border(IndicatorShader::element(
                 renderer,
                 Key::Window(Usage::Border, window_key.clone()),
@@ -582,12 +574,6 @@ impl CosmicWindow {
         // SSD header rendering removed: desktop-shell renders headers via protocol.
 
         elements.into_iter().map(C::from).collect()
-    }
-
-    /// Update the theme stored in internal state.
-    pub(crate) fn set_theme(&self, theme: cosmic::Theme) {
-        let p = self.p();
-        *p.theme.lock().unwrap() = theme;
     }
 
     /// Update the appearance configuration, adjusting tiling state if needed.

@@ -133,7 +133,6 @@ pub struct TilingLayout {
     backdrop_id: Id,
     swapping_stack_surface_id: Id,
     last_overview_hover: Option<(Option<Instant>, TargetZone)>,
-    pub theme: cosmic::Theme,
     pub appearance: AppearanceConfig,
 }
 
@@ -347,7 +346,6 @@ pub struct RestoreTilingState {
 
 impl TilingLayout {
     pub fn new(
-        theme: cosmic::Theme,
         appearance: AppearanceConfig,
         output: &Output,
     ) -> TilingLayout {
@@ -364,7 +362,6 @@ impl TilingLayout {
             backdrop_id: Id::new(),
             swapping_stack_surface_id: Id::new(),
             last_overview_hover: None,
-            theme,
             appearance,
         }
     }
@@ -671,7 +668,6 @@ impl TilingLayout {
                 let mapped: CosmicMapped = CosmicWindow::new(
                     stack_surface,
                     this_stack.loop_handle(),
-                    this.theme.clone(),
                     this.appearance,
                 )
                 .into();
@@ -1079,7 +1075,6 @@ impl TilingLayout {
                 let mapped: CosmicMapped = CosmicWindow::new(
                     this_surface.clone(),
                     this_stack.loop_handle(),
-                    this.theme.clone(),
                     this.appearance,
                 )
                 .into();
@@ -1165,7 +1160,6 @@ impl TilingLayout {
                 let mapped: CosmicMapped = CosmicWindow::new(
                     other_surface.clone(),
                     other_stack.loop_handle(),
-                    this.theme.clone(),
                     this.appearance,
                 )
                 .into();
@@ -1524,7 +1518,6 @@ impl TilingLayout {
                     let mapped: CosmicMapped = CosmicWindow::new(
                         surface,
                         loop_handle,
-                        self.theme.clone(),
                         self.appearance,
                     )
                     .into();
@@ -2147,7 +2140,6 @@ impl TilingLayout {
                 Data::Mapped { mapped, .. } => {
                     mapped.convert_to_stack(
                         (&self.output, mapped.bbox()),
-                        self.theme.clone(),
                         self.appearance,
                     );
                     focus_stack.append(mapped.clone());
@@ -2169,7 +2161,6 @@ impl TilingLayout {
                     mapped.convert_to_surface(
                         first,
                         (&self.output, mapped.bbox()),
-                        self.theme.clone(),
                         self.appearance,
                     );
                     new_elements.push(mapped.clone());
@@ -2187,7 +2178,6 @@ impl TilingLayout {
                 let window = CosmicMapped::from(CosmicWindow::new(
                     other,
                     handle.clone(),
-                    self.theme.clone(),
                     self.appearance,
                 ));
                 window.output_enter(&self.output, window.bbox());
@@ -2289,7 +2279,6 @@ impl TilingLayout {
                     let stack = CosmicStack::new(
                         surfaces.into_iter(),
                         handle,
-                        self.theme.clone(),
                         self.appearance,
                     );
 
@@ -2772,7 +2761,6 @@ impl TilingLayout {
                     Data::Mapped { mapped, .. } => {
                         mapped.convert_to_stack(
                             (&self.output, mapped.bbox()),
-                            self.theme.clone(),
                             self.appearance,
                         );
                         let Some(stack) = mapped.stack_ref() else {
@@ -3414,7 +3402,6 @@ impl TilingLayout {
                 Some(None),
                 None,
                 None,
-                self.theme.cosmic(),
             )
             .0;
 
@@ -4000,7 +3987,6 @@ impl TilingLayout {
         overview: (OverviewMode, Option<(SwapIndicator, Option<&Tree<Data>>)>),
         resize_indicator: Option<(ResizeMode, ResizeIndicator)>,
         indicator_thickness: u8,
-        theme: &cosmic::theme::CosmicTheme,
     ) -> Result<Vec<CosmicMappedRenderElement<R>>, OutputNotMapped>
     where
         R: AsGlowRenderer,
@@ -4069,7 +4055,6 @@ impl TilingLayout {
                     is_mouse_tiling,
                     swap_desc.clone(),
                     overview.1.as_ref().and_then(|(_, tree)| *tree),
-                    theme,
                 ))
             } else {
                 None
@@ -4086,7 +4071,6 @@ impl TilingLayout {
                 percentage,
                 indicator_thickness,
                 swap_desc.is_some(),
-                theme,
             ));
 
             geometries
@@ -4107,7 +4091,6 @@ impl TilingLayout {
                 is_mouse_tiling,
                 swap_desc.clone(),
                 overview.1.as_ref().and_then(|(_, tree)| *tree),
-                theme,
             ))
         } else {
             None
@@ -4142,7 +4125,6 @@ impl TilingLayout {
             swap_desc.clone(),
             &self.swapping_stack_surface_id,
             &self.backdrop_id,
-            theme,
         ));
 
         // tiling hints
@@ -4160,7 +4142,6 @@ impl TilingLayout {
         seat: Option<&Seat<State>>,
         non_exclusive_zone: Rectangle<i32, Local>,
         overview: (OverviewMode, Option<(SwapIndicator, Option<&Tree<Data>>)>),
-        theme: &cosmic::theme::CosmicTheme,
     ) -> Result<Vec<CosmicMappedRenderElement<R>>, OutputNotMapped>
     where
         R: AsGlowRenderer,
@@ -4220,7 +4201,6 @@ impl TilingLayout {
                     is_mouse_tiling,
                     swap_desc.clone(),
                     overview.1.as_ref().and_then(|(_, tree)| *tree),
-                    theme,
                 ))
             } else {
                 None
@@ -4256,7 +4236,6 @@ impl TilingLayout {
                 is_mouse_tiling,
                 swap_desc.clone(),
                 overview.1.as_ref().and_then(|(_, tree)| *tree),
-                theme,
             ))
         } else {
             None
@@ -4331,7 +4310,6 @@ fn geometries_for_groupview<'a, R>(
     mouse_tiling: Option<Option<&TargetZone>>,
     swap_desc: Option<NodeDesc>,
     swap_tree: Option<&Tree<Data>>,
-    _theme: &cosmic::theme::CosmicTheme,
 ) -> (
     HashMap<NodeId, Rectangle<i32, Local>>,
     Vec<CosmicMappedRenderElement<R>>,
@@ -5009,7 +4987,6 @@ fn render_old_tree_windows<R>(
     percentage: f32,
     indicator_thickness: u8,
     is_swap_mode: bool,
-    theme: &cosmic::theme::CosmicTheme,
 ) -> Vec<CosmicMappedRenderElement<R>>
 where
     R: AsGlowRenderer,
@@ -5018,7 +4995,8 @@ where
     CosmicWindowRenderElement<R>: RenderElement<R>,
     CosmicStackRenderElement<R>: RenderElement<R>,
 {
-    let window_hint = crate::theme::active_window_hint(theme);
+    let lt = crate::theme::lunaris_theme();
+    let window_hint = crate::theme::lunaris_hint_rgb(&lt);
     let mut elements = Vec::default();
     let mut shadow_elements = Vec::default();
 
@@ -5088,7 +5066,7 @@ where
                         radius,
                         alpha,
                         output_scale,
-                        [window_hint.red, window_hint.green, window_hint.blue],
+                        window_hint,
                     ),
                 ));
             }
@@ -5255,7 +5233,6 @@ fn render_new_tree_windows<R>(
     swap_desc: Option<NodeDesc>,
     swapping_stack_surface_id: &Id,
     backdrop_id: &Id,
-    theme: &cosmic::theme::CosmicTheme,
 ) -> Vec<CosmicMappedRenderElement<R>>
 where
     R: AsGlowRenderer,
@@ -5312,7 +5289,8 @@ where
     let (swap_indicator, swap_tree) = overview.1.unzip();
     let swap_desc = swap_desc.filter(|_| is_active_output);
     let swap_tree = swap_tree.flatten().filter(|_| is_active_output);
-    let window_hint = crate::theme::active_window_hint(theme);
+    let lt = crate::theme::lunaris_theme();
+    let window_hint = crate::theme::lunaris_hint_rgb(&lt);
     let group_color = GROUP_COLOR;
 
     // render placeholder, if we are swapping to an empty workspace
@@ -5365,7 +5343,7 @@ where
                 radius,
                 transition.unwrap_or(1.0),
                 output_scale,
-                [window_hint.red, window_hint.green, window_hint.blue],
+                window_hint,
             ),
         ));
 
@@ -5483,7 +5461,7 @@ where
                                 radius,
                                 alpha,
                                 output_scale,
-                                [window_hint.red, window_hint.green, window_hint.blue],
+                                window_hint,
                             ),
                         ));
                     }

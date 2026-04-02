@@ -61,7 +61,6 @@ impl Hash for StackHover {
 pub fn stack_hover(
     _evlh: calloop::LoopHandle<'static, crate::state::State>,
     size: Size<i32, Logical>,
-    _theme: cosmic::Theme,
 ) -> StackHover {
     StackHover {
         inner: Arc::new(Mutex::new(StackHoverInternal { size })),

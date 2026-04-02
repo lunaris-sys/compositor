@@ -18,7 +18,6 @@ use crate::{
 };
 
 use calloop::LoopHandle;
-use cosmic::theme::CosmicTheme;
 use smithay::{
     backend::{
         input::ButtonState,
@@ -68,7 +67,7 @@ pub struct MoveGrabState {
 
 impl MoveGrabState {
     #[profiling::function]
-    pub fn render<I, R>(&self, renderer: &mut R, output: &Output, theme: &CosmicTheme, lt: &lunaris_theme::LunarisTheme) -> Vec<I>
+    pub fn render<I, R>(&self, renderer: &mut R, output: &Output, lt: &lunaris_theme::LunarisTheme) -> Vec<I>
     where
         R: Renderer + ImportAll + ImportMem + AsGlowRenderer,
         R::TextureId: Send + Clone + 'static,
@@ -454,7 +453,6 @@ impl MoveGrab {
                     let element = stack_hover(
                         state.common.event_loop_handle.clone(),
                         geo.size.as_logical(),
-                        state.common.theme.clone(),
                     );
                     for output in &self.window_outputs {
                         element.output_enter(
@@ -871,7 +869,6 @@ impl Drop for MoveGrab {
                                 window_location,
                                 grab_state.window.geometry().size.as_global(),
                             ));
-                            let theme = shell.theme.clone();
                             let workspace = shell.active_space_mut(&output).unwrap();
                             let (window, location) = workspace.floating_layer.drop_window(
                                 grab_state.window,
@@ -912,7 +909,6 @@ impl Drop for MoveGrab {
                                             direction,
                                             &seat,
                                             ManagedLayer::Floating,
-                                            &theme,
                                             &window,
                                         );
                                     }

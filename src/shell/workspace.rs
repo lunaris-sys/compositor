@@ -26,7 +26,6 @@ use crate::{
 use cosmic_comp_config::AppearanceConfig;
 use cosmic_comp_config::workspace::{OutputMatch, PinnedWorkspace};
 
-use cosmic::theme::CosmicTheme;
 use cosmic_protocols::workspace::v2::server::zcosmic_workspace_handle_v2::TilingState;
 use id_tree::Tree;
 use indexmap::IndexSet;
@@ -362,11 +361,10 @@ impl Workspace {
         handle: WorkspaceHandle,
         output: Output,
         tiling_enabled: bool,
-        theme: cosmic::Theme,
         appearance: AppearanceConfig,
     ) -> Workspace {
-        let tiling_layer = TilingLayout::new(theme.clone(), appearance, &output);
-        let floating_layer = FloatingLayout::new(theme, appearance, &output);
+        let tiling_layer = TilingLayout::new(appearance, &output);
+        let floating_layer = FloatingLayout::new(appearance, &output);
         let output_match = output_match_for_output(&output);
 
         Workspace {
@@ -395,11 +393,10 @@ impl Workspace {
         pinned: &PinnedWorkspace,
         handle: WorkspaceHandle,
         output: Output,
-        theme: cosmic::Theme,
         appearance: AppearanceConfig,
     ) -> Self {
-        let tiling_layer = TilingLayout::new(theme.clone(), appearance, &output);
-        let floating_layer = FloatingLayout::new(theme, appearance, &output);
+        let tiling_layer = TilingLayout::new(appearance, &output);
+        let floating_layer = FloatingLayout::new(appearance, &output);
         let output_match = output_match_for_output(&output);
 
         Workspace {
@@ -1512,7 +1509,6 @@ impl Workspace {
         overview: (OverviewMode, Option<(SwapIndicator, Option<&Tree<Data>>)>),
         resize_indicator: Option<(ResizeMode, ResizeIndicator)>,
         indicator_thickness: u8,
-        theme: &CosmicTheme,
     ) -> Result<Vec<WorkspaceRenderElement<R>>, OutputNotMapped>
     where
         R: AsGlowRenderer,
@@ -1650,7 +1646,6 @@ impl Workspace {
                         resize_indicator.clone(),
                         indicator_thickness,
                         alpha,
-                        theme,
                     )
                     .into_iter()
                     .map(WorkspaceRenderElement::from),
@@ -1679,7 +1674,6 @@ impl Workspace {
                         overview,
                         resize_indicator,
                         indicator_thickness,
-                        theme,
                     )?
                     .into_iter()
                     .map(WorkspaceRenderElement::from),
@@ -1714,7 +1708,6 @@ impl Workspace {
         last_active_seat: &Seat<State>,
         render_focus: bool,
         overview: (OverviewMode, Option<(SwapIndicator, Option<&Tree<Data>>)>),
-        theme: &CosmicTheme,
     ) -> Result<Vec<WorkspaceRenderElement<R>>, OutputNotMapped>
     where
         R: AsGlowRenderer,
@@ -1832,7 +1825,6 @@ impl Workspace {
                         render_focus.then_some(last_active_seat),
                         zone,
                         overview,
-                        theme,
                     )?
                     .into_iter()
                     .map(WorkspaceRenderElement::from),

@@ -162,9 +162,7 @@ pub fn run(hooks: crate::hooks::Hooks) -> Result<(), Box<dyn Error>> {
     // init backend
     backend::init_backend_auto(&display, &mut event_loop, &mut state)?;
 
-    if let Err(err) = theme::watch_theme(event_loop.handle()) {
-        warn!(?err, "Failed to watch theme");
-    }
+    theme::watch_theme(event_loop.handle());
 
     // run the event loop
     event_loop.run(None, &mut state, |state| {

@@ -180,7 +180,6 @@ pub fn tab_items(
                 let mapped: CosmicMapped = CosmicWindow::new(
                     surface,
                     state.common.event_loop_handle.clone(),
-                    state.common.theme.clone(),
                     state.common.config.cosmic_conf.appearance_settings,
                 )
                 .into();

@@ -586,7 +586,6 @@ impl MenuGrab {
         _alignment: MenuAlignment,
         screen_space_relative: Option<f64>,
         _handle: LoopHandle<'static, crate::state::State>,
-        _theme: cosmic::Theme,
         menu_id: Option<u32>,
         shell_focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
     ) -> MenuGrab {

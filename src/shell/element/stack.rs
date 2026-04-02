@@ -124,7 +124,6 @@ pub struct CosmicStackInternal {
     geometry: Mutex<Option<Rectangle<i32, Global>>>,
     mask: Mutex<Option<tiny_skia::Mask>>,
     tiled: AtomicBool,
-    theme: Mutex<cosmic::Theme>,
     appearance_conf: Mutex<AppearanceConfig>,
 }
 
@@ -157,7 +156,6 @@ impl CosmicStack {
     pub fn new<I: Into<CosmicSurface>>(
         windows: impl Iterator<Item = I>,
         handle: LoopHandle<'static, crate::state::State>,
-        _theme: cosmic::Theme,
         appearance: AppearanceConfig,
     ) -> CosmicStack {
         let windows = windows.map(Into::into).collect::<Vec<_>>();
@@ -205,7 +203,6 @@ impl CosmicStack {
                 geometry: Mutex::new(None),
                 mask: Mutex::new(None),
                 tiled: AtomicBool::new(false),
-                theme: Mutex::new(_theme),
                 appearance_conf: Mutex::new(appearance),
             })),
             handle,
@@ -715,7 +712,6 @@ impl CosmicStack {
         let windows = p.windows.lock().unwrap();
         let active = p.active.load(Ordering::SeqCst);
         let activated = p.activated.load(Ordering::Acquire);
-        let _theme = p.theme.lock().unwrap();
         let appearance = p.appearance_conf.lock().unwrap();
         let tiled = p.tiled.load(Ordering::Acquire);
 
@@ -799,7 +795,6 @@ impl CosmicStack {
             let p = self.p();
             let windows = p.windows.lock().unwrap();
             let active = p.active.load(Ordering::SeqCst);
-            let _theme = p.theme.lock().unwrap();
             let appearance = p.appearance_conf.lock().unwrap();
             let tiled = p.tiled.load(Ordering::Acquire);
             let maximized = windows[active].is_maximized(false);
@@ -866,11 +861,6 @@ impl CosmicStack {
         });
 
         elements.into_iter().map(C::from).collect()
-    }
-
-    pub(crate) fn set_theme(&self, theme: cosmic::Theme) {
-        let p = self.p();
-        *p.theme.lock().unwrap() = theme;
     }
 
     pub fn update_appearance_conf(&self, appearance: &AppearanceConfig) {

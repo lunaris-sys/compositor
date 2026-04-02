@@ -227,6 +227,13 @@ impl PointerGrab<State> for MenuGrab {
         handle: &mut PointerInnerHandle<'_, State>,
         event: &ButtonEvent,
     ) {
+        // If no shell client is connected, the grab has no way to be released
+        // via protocol (no activate/dismiss will arrive). Release immediately
+        // on any button press to prevent the pointer from getting stuck.
+        if self.shell_focus.is_none() {
+            handle.unset_grab(self, state, event.serial, event.time, true);
+            return;
+        }
         // Forward button events to desktop-shell.
         // The grab is released when desktop-shell sends activate or dismiss.
         handle.button(state, event);

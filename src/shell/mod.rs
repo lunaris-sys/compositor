@@ -3522,46 +3522,46 @@ impl Shell {
             dh: &DisplayHandle,
         ) -> Option<(focus::target::PointerFocusTarget, Point<f64, Logical>)> {
             use smithay::reexports::wayland_server::Resource;
-            let instance = shell_overlay_state.overlay_instance()?;
-            // The overlay instance and the XDG window surface live on separate Wayland
-            // connections (different client IDs) but belong to the same process (same PID).
-            // Match by PID instead of client identity.
-            let overlay_pid = instance
-                .client()
-                .and_then(|c| c.get_credentials(dh).ok())
-                .map(|creds| creds.pid);
-            tracing::info!(
-                "find_shell_focus: overlay instance PID = {:?}",
-                overlay_pid
-            );
-            let overlay_pid = overlay_pid?;
-            for mapped in shell.mapped() {
-                let Some(surface) = mapped.wl_surface() else {
-                    continue;
-                };
-                let surface_pid = (&*surface)
-                    .client()
-                    .and_then(|c| c.get_credentials(dh).ok())
-                    .map(|creds| creds.pid);
-                tracing::info!(
-                    "find_shell_focus: mapped surface PID = {:?}",
-                    surface_pid,
-                );
-                if surface_pid == Some(overlay_pid) {
-                    tracing::info!("find_shell_focus: MATCH found, returning focus target");
-                    let origin = shell
-                        .space_for(mapped)
-                        .and_then(|ws| ws.element_geometry(mapped))
-                        .map(|geo| geo.loc.as_logical().to_f64())
-                        .unwrap_or_default();
-                    let target = focus::target::PointerFocusTarget::WlSurface {
-                        surface: surface.into_owned(),
-                        toplevel: None,
-                    };
-                    return Some((target, origin));
+            tracing::info!("find_shell_focus: called");
+            let Some(instance) = shell_overlay_state.overlay_instance() else {
+                tracing::info!("find_shell_focus: no overlay instance, returning None");
+                return None;
+            };
+            let client = instance.client();
+            tracing::info!("find_shell_focus: instance client={}", client.is_some());
+            let creds = client.and_then(|c| c.get_credentials(dh).ok());
+            tracing::info!("find_shell_focus: credentials={creds:?}");
+            let Some(overlay_pid) = creds.map(|c| c.pid) else {
+                tracing::info!("find_shell_focus: no PID, returning None");
+                return None;
+            };
+
+            // Desktop-shell is a layer-shell client, not an XDG toplevel.
+            // Search the layer map on each output for a surface whose client
+            // PID matches the overlay instance PID.
+            tracing::info!("find_shell_focus: overlay_pid={overlay_pid}");
+            for output in shell.outputs() {
+                let layer_map = layer_map_for_output(output);
+                let layer_count = layer_map.layers().count();
+                tracing::info!("find_shell_focus: output={} layer_count={layer_count}", output.name());
+                for layer in layer_map.layers() {
+                    let surface = layer.wl_surface();
+                    let surface_pid = surface
+                        .client()
+                        .and_then(|c| c.get_credentials(dh).ok())
+                        .map(|creds| creds.pid);
+                    tracing::info!("find_shell_focus: layer ns={} pid={surface_pid:?}", layer.namespace());
+                    if surface_pid == Some(overlay_pid) {
+                        tracing::info!("find_shell_focus: MATCH on layer ns={}", layer.namespace());
+                        let target = focus::target::PointerFocusTarget::WlSurface {
+                            surface: surface.clone(),
+                            toplevel: None,
+                        };
+                        return Some((target, Point::from((0., 0.))));
+                    }
                 }
             }
-            tracing::info!("find_shell_focus: NO match found, returning None");
+            tracing::info!("find_shell_focus: NO match found");
             None
         }
 

@@ -417,6 +417,48 @@ impl CompositorHandler for State {
             if changed {
                 shell.workspaces.recalculate();
             }
+
+            // After a layer surface commit, re-evaluate pointer focus.
+            // This handles the case where desktop-shell resets the input
+            // region (e.g. after a context menu closes). Without this,
+            // pointer focus can get stuck on the layer surface because
+            // the input region change requires a Wayland round-trip and
+            // the grab release happens before the commit arrives.
+            // After a layer surface commit, re-evaluate pointer focus.
+            // This handles the case where desktop-shell resets the input
+            // region (e.g. after a context menu closes). Without this,
+            // pointer focus can get stuck on the layer surface because
+            // the input region change requires a Wayland round-trip and
+            // the grab release happens before the commit arrives.
+            //
+            // We always re-evaluate (even if a grab is active) because
+            // the grab handler itself uses pending_focus which we want
+            // to keep correct. The is_grabbed check was removed because
+            // the grab is always released before the commit arrives.
+            let seats: Vec<_> = shell.seats.iter().cloned().collect();
+            std::mem::drop(shell);
+            for seat in &seats {
+                if let Some(ptr) = seat.get_pointer() {
+                    if !ptr.is_grabbed() {
+                        let position = ptr.current_location();
+                        let shell = self.common.shell.read();
+                        let fresh_under =
+                            crate::state::State::surface_under(position.as_global(), &output, &shell)
+                                .map(|(target, pos)| (target, pos.as_logical()));
+                        std::mem::drop(shell);
+                        ptr.motion(
+                            self,
+                            fresh_under,
+                            &smithay::input::pointer::MotionEvent {
+                                location: position,
+                                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+                                time: 0,
+                            },
+                        );
+                        ptr.frame(self);
+                    }
+                }
+            }
         }
     }
 }

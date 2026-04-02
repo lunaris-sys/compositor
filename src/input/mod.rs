@@ -369,6 +369,29 @@ impl State {
                     let new_under = State::surface_under(position, &output, &shell)
                         .map(|(target, pos)| (target, pos.as_logical()));
 
+                    // Debug: log what surface_under found after grab release
+                    if let Some((ref target, _)) = new_under {
+                        match target {
+                            crate::shell::focus::target::PointerFocusTarget::WlSurface { .. } => {
+                                tracing::trace!("surface_under: WlSurface (layer or toplevel)");
+                            }
+                            crate::shell::focus::target::PointerFocusTarget::X11Surface { .. } => {
+                                tracing::trace!("surface_under: X11Surface");
+                            }
+                            crate::shell::focus::target::PointerFocusTarget::StackUI(_) => {
+                                tracing::trace!("surface_under: StackUI");
+                            }
+                            crate::shell::focus::target::PointerFocusTarget::WindowUI(_) => {
+                                tracing::trace!("surface_under: WindowUI");
+                            }
+                            crate::shell::focus::target::PointerFocusTarget::ResizeFork(_) => {
+                                tracing::trace!("surface_under: ResizeFork");
+                            }
+                        }
+                    } else {
+                        tracing::trace!("surface_under: None");
+                    }
+
                     std::mem::drop(shell);
                     ptr.relative_motion(
                         self,

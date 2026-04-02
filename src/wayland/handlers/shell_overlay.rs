@@ -7,7 +7,8 @@ use smithay::wayland::seat::WaylandFocus;
 
 use crate::{
     delegate_shell_overlay,
-    shell::grabs::menu::{Item, SeatMenuGrabState},
+    shell::{SeatExt, grabs::menu::{Item, SeatMenuGrabState}},
+    utils::prelude::*,
     state::State,
     wayland::protocols::shell_overlay::{
         ShellOverlayHandler, ShellOverlayState,
@@ -20,6 +21,7 @@ impl ShellOverlayHandler for State {
     }
 
     fn context_menu_activate(&mut self, menu_id: u32, index: u32) {
+        tracing::info!("context_menu_activate: menu_id={menu_id} index={index}");
         let Some(callbacks) = self.common.pending_menu_callbacks.remove(&menu_id) else {
             tracing::warn!(
                 "shell_overlay: received activate for unknown menu_id {}",
@@ -46,11 +48,24 @@ impl ShellOverlayHandler for State {
         }
 
         unset_overlay_grab(self, menu_id);
+        tracing::info!("context_menu_activate: grab released for menu_id={menu_id}");
+        // Notify desktop-shell that the menu is closed so it can restore
+        // click-through on the layer surface (set_ignore_cursor_events(true)).
+        self.common
+            .shell_overlay_state
+            .close_context_menu(menu_id);
+        tracing::info!("context_menu_activate: context_menu_closed sent for menu_id={menu_id}");
     }
 
     fn context_menu_dismiss(&mut self, menu_id: u32) {
+        tracing::info!("context_menu_dismiss: menu_id={menu_id}");
         self.common.pending_menu_callbacks.remove(&menu_id);
         unset_overlay_grab(self, menu_id);
+        tracing::info!("context_menu_dismiss: grab released for menu_id={menu_id}");
+        self.common
+            .shell_overlay_state
+            .close_context_menu(menu_id);
+        tracing::info!("context_menu_dismiss: context_menu_closed sent for menu_id={menu_id}");
     }
 
     fn zoom_increase(&mut self) {
@@ -216,6 +231,8 @@ fn unset_overlay_grab(state: &mut State, menu_id: u32) {
     if let Some(seat) = matching_seat {
         if let Some(ptr) = seat.get_pointer() {
             ptr.unset_grab(state, SERIAL_COUNTER.next_serial(), 0);
+            // Pointer focus re-evaluation happens in the commit handler
+            // when the layer surface input region is updated by desktop-shell.
         }
     }
 }

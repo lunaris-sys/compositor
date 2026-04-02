@@ -268,6 +268,64 @@ impl ShellOverlayState {
     }
 }
 
+// ===== Window header methods =====
+
+impl ShellOverlayState {
+    /// Notify connected shells to show a window header bar.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_window_header_show(
+        &self,
+        surface_id: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        title: String,
+        activated: bool,
+        has_minimize: bool,
+        has_maximize: bool,
+    ) {
+        for instance in &self.instances {
+            instance.window_header_show(
+                surface_id,
+                x, y, width, height,
+                title.clone(),
+                activated as u32,
+                has_minimize as u32,
+                has_maximize as u32,
+            );
+        }
+    }
+
+    /// Notify connected shells to update a window header bar.
+    pub fn send_window_header_update(
+        &self,
+        surface_id: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        title: String,
+        activated: bool,
+    ) {
+        for instance in &self.instances {
+            instance.window_header_update(
+                surface_id,
+                x, y, width, height,
+                title.clone(),
+                activated as u32,
+            );
+        }
+    }
+
+    /// Notify connected shells to hide a window header bar.
+    pub fn send_window_header_hide(&self, surface_id: u32) {
+        for instance in &self.instances {
+            instance.window_header_hide(surface_id);
+        }
+    }
+}
+
 // ===== Menu item types =====
 
 /// A window management action that can appear as a context menu entry.
@@ -389,6 +447,9 @@ pub trait ShellOverlayHandler {
     fn zoom_set_increment(&mut self, value: u32);
     /// Called when the shell selects a viewport movement mode.
     fn zoom_set_movement(&mut self, mode: u32);
+
+    /// Called when the shell sends a window header action.
+    fn window_header_action(&mut self, surface_id: u32, action: u32);
 }
 
 // ===== GlobalDispatch =====
@@ -461,6 +522,13 @@ where
                     smithay::reexports::wayland_server::WEnum::Unknown(v) => v,
                 };
                 state.zoom_set_movement(mode_u32);
+            }
+            OverlayRequest::WindowHeaderAction { surface_id, action } => {
+                let action_u32 = match action {
+                    smithay::reexports::wayland_server::WEnum::Value(v) => v as u32,
+                    smithay::reexports::wayland_server::WEnum::Unknown(v) => v,
+                };
+                state.window_header_action(surface_id, action_u32);
             }
         }
     }

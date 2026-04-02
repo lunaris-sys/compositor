@@ -3,6 +3,7 @@
 //! Handler implementation for the `lunaris-shell-overlay-v1` protocol.
 
 use smithay::utils::SERIAL_COUNTER;
+use smithay::wayland::seat::WaylandFocus;
 
 use crate::{
     delegate_shell_overlay,
@@ -82,6 +83,87 @@ impl ShellOverlayHandler for State {
         };
         self.common.config.cosmic_conf.accessibility_zoom.view_moves = movement;
         self.common.update_config();
+    }
+
+    fn window_header_action(&mut self, surface_id: u32, action: u32) {
+        use smithay::utils::SERIAL_COUNTER;
+
+        let shell = self.common.shell.read();
+        let mapped = shell.mapped().find(|m| {
+            m.active_window()
+                .wl_surface()
+                .map(|s| {
+                    use smithay::reexports::wayland_server::Resource;
+                    let id: u32 = s.as_ref().id().protocol_id();
+                    id == surface_id
+                })
+                .unwrap_or(false)
+        });
+
+        let Some(mapped) = mapped else {
+            tracing::warn!(
+                "shell_overlay: window_header_action for unknown surface_id {}",
+                surface_id
+            );
+            return;
+        };
+
+        let surface = mapped.active_window();
+        match action {
+            1 => {
+                // Minimize
+                surface.set_minimized(true);
+            }
+            2 => {
+                // Toggle maximize
+                let maximized = surface.is_maximized(false);
+                surface.set_maximized(!maximized);
+                if let Some(toplevel) = surface.0.toplevel() {
+                    toplevel.send_configure();
+                }
+            }
+            3 => {
+                // Close
+                surface.close();
+            }
+            4 => {
+                // Move -- start interactive move via the last active seat
+                let seat = shell.seats.last_active().clone();
+                let serial = SERIAL_COUNTER.next_serial();
+                if let Some(wl_surface) = surface.wl_surface().map(std::borrow::Cow::into_owned) {
+                    let evlh = self.common.event_loop_handle.clone();
+                    std::mem::drop(shell);
+                    let res = self.common.shell.write().move_request(
+                        &wl_surface,
+                        &seat,
+                        serial,
+                        crate::shell::grabs::ReleaseMode::NoMouseButtons,
+                        false,
+                        &self.common.config,
+                        &evlh,
+                        false,
+                    );
+                    if let Some((grab, focus)) = res {
+                        if grab.is_touch_grab() {
+                            seat.get_touch().unwrap().set_grab(self, grab, serial);
+                        } else {
+                            seat.get_pointer()
+                                .unwrap()
+                                .set_grab(self, grab, serial, focus);
+                        }
+                    }
+                    return;
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    "shell_overlay: unknown window_header_action {} for surface {}",
+                    action,
+                    surface_id
+                );
+            }
+        }
+        std::mem::drop(shell);
     }
 
     fn tab_activate(&mut self, stack_id: u32, index: u32) {

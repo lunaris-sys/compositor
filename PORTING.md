@@ -17,7 +17,7 @@ Everything related to the Wayland compositor core:
 
 - `src/backend/` — DRM/KMS, rendering, Winit and X11 backends
 - `src/shell/layout/` — floating and tiling layout engine (the primary reason for this fork)
-- `src/shell/element/` — window elements, stack, tabs (retains cosmic/Iced dependency for now, see Technical Debt below)
+- `src/shell/element/` — window elements, stack (Iced dependency removed; all UI delegated to desktop-shell via protocol)
 - `src/shell/workspace.rs` — workspace management
 - `src/shell/focus/` — keyboard focus management
 - `src/input/` — input handling, gestures
@@ -191,30 +191,93 @@ cosmic-config code paths.
 `com.system76.CosmicPanel` as the sandbox engine. Changed to
 `dev.lunaris.desktop-shell` to match the Lunaris desktop shell identity.
 
+### IcedElement replacement for CosmicStack and CosmicWindow
+
+`src/shell/element/stack.rs` and `src/shell/element/window.rs` no longer use the
+`IcedElement<P>` wrapper. Both are now standalone structs with
+`Arc<Mutex<Internal>>` + `LoopHandle`. All Smithay traits (`IsAlive`,
+`SpaceElement`, `PointerTarget`, `TouchTarget`, `KeyboardTarget`) are implemented
+directly. `CosmicStack` hit-tests the top `TAB_HEIGHT` pixels for DragStart
+(left-click) and Menu (right-click) via `handle.insert_idle`. `CosmicWindow`
+uses the existing `Focus::under()` geometry to route resize edges and header
+actions. No Iced widgets are rendered; tab bars and window headers are delegated
+to desktop-shell via the shell overlay protocol.
+
+### IcedElement replacement for indicators
+
+`resize_indicator.rs`, `stack_hover.rs`, and `swap_indicator.rs` are standalone
+structs with no-op rendering. They store metadata (edges, direction, size) and
+expose the same public API (`resize()`, `output_enter()`, `render_elements()`)
+but return empty render element lists. The `Program` trait and Iced `view()`
+implementations are removed.
+
+### Window header protocol extension
+
+`lunaris-shell-overlay.xml` extended with `window_header_show`,
+`window_header_update`, `window_header_hide` events and `window_header_action`
+request. The `window_header_action_type` enum covers minimize, maximize, close,
+and move. Desktop-shell renders header bars with title, activation state, and
+conditional minimize/maximize buttons. The compositor routes header button
+clicks back to the appropriate window management action.
+
+### Zoom toolbar protocol replacement
+
+`src/shell/zoom.rs` no longer contains any Iced code. `ZoomProgram`,
+`ZoomMessage`, `ZoomElement`, `ZoomFocusTarget`, and all PointerTarget/TouchTarget
+implementations for the zoom UI are removed. The viewport logic (focal point,
+level animation, output state) is preserved. Zoom activation and level changes
+emit `zoom_toolbar_show`, `zoom_toolbar_update`, and `zoom_toolbar_hide`
+protocol events. Desktop-shell renders the toolbar with zoom controls; user
+actions (increase, decrease, close, set increment, set movement) are sent back
+as protocol requests.
+
+### Iced menu fallback removal
+
+The Iced context menu rendering path in `src/shell/grabs/menu/mod.rs` is
+removed. `ContextMenu`, its `Program` impl, and `menu/item.rs` (the
+`SubmenuItem` Iced widget) are deleted. `MenuGrab` now operates exclusively via
+the shell overlay protocol. When no desktop-shell client is connected,
+`send_context_menu` returns `None` and the menu simply does not appear rather
+than falling back to in-compositor Iced rendering.
+
+### LunarisTheme global and cosmic::Theme removal
+
+`src/theme.rs` contains a `RwLock<Option<LunarisTheme>>` global updated by a
+`lunaris-theme::ThemeWatcher`. All color, radius, gap, and hint reads across the
+compositor use `crate::theme::lunaris_theme()` instead of `cosmic::Theme`
+methods. The `cosmic::Theme` field has been removed from `Common`, `Shell`,
+`CosmicStackInternal`, `CosmicWindowInternal`, `FloatingLayout`,
+`TilingLayout`, `Workspaces`, and all constructors that previously accepted it.
+The `cosmic::theme::system_preference()` initialization and the cosmic theme
+file watcher (ThemeMode, dark/light config) are deleted.
+
+### libcosmic dependency removal
+
+The `libcosmic` crate (which pulls in Iced, iced_tiny_skia, and the full cosmic
+widget toolkit) is removed from `Cargo.toml`. `utils/iced/mod.rs` and
+`utils/iced/state.rs` are deleted. The `cosmic-config` crate remains as a
+dependency because the Shortcuts and WindowRules watchers
+(`cosmic_settings_config::shortcuts::context()`) return `cosmic_config::Config`
+handles. Removing `cosmic-config` requires replacing the shortcut/window-rule
+config infrastructure, which is deferred.
+
+### CosmicTk and icon theme removal
+
+The `CosmicTk` config watcher in `config/mod.rs` (which tracked the COSMIC
+toolkit icon theme) is removed. `cosmic::icon_theme::set_default()` calls are
+deleted. XWayland falls back to the `"hicolor"` icon theme. A Lunaris-native
+icon theme system is planned for Phase 4.
+
 ## Technical debt
 
-### cosmic/Iced: remaining usage
+### cosmic-config dependency
 
-The `cosmic` and `iced` crates remain as dependencies for three reasons:
-
-1. **zoom.rs** -- The accessibility zoom toolbar is a fully interactive Iced widget
-   with 7 buttons and a context menu. It has not been replaced by a protocol event.
-   This is the last Iced UI element that renders visible content.
-
-2. **utils/iced/mod.rs + state.rs** -- The `IcedElement<P>` wrapper provides the
-   `SpaceElement`, `PointerTarget`, `KeyboardTarget`, and `TouchTarget`
-   implementations for `CosmicStack`. Even though `view()` returns empty content,
-   the wrapper is needed for input routing (DragStart, Menu) and the Smithay
-   render pipeline integration. Replacing it requires a custom `SpaceElement` for
-   stacks.
-
-3. **cosmic::Theme** -- Used throughout the compositor for color access
-   (`accent_color()`, `primary_container_color()`, palette lookups). The theme
-   watcher in `theme.rs` depends on `cosmic_config`. Replacing this requires a
-   Lunaris-native theme system that reads from `theme.toml`.
-
-4. **menu/mod.rs fallback** -- The Iced context menu rendering path is kept for
-   zoom.rs menus and as a fallback when no desktop-shell client is connected.
+`cosmic-config` remains as a direct dependency for two reasons: the Shortcuts
+watcher (`cosmic_settings_config::shortcuts::context()` returns a
+`cosmic_config::Config`) and the WindowRules watcher. The `cosmic_helper` field
+on `Config` is also retained for legacy zoom config write-back. Removing
+`cosmic-config` requires replacing the shortcut and window-rule configuration
+infrastructure with a Lunaris-native TOML-based system.
 
 ## Upstream sync process
 

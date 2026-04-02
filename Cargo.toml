@@ -47,13 +47,11 @@ i18n-embed = { version = "0.16", features = [
     "desktop-requester",
 ] }
 i18n-embed-fl = "0.10"
-iced_tiny_skia = { git = "https://github.com/pop-os/libcosmic" }
 indexmap = "2.13"
 keyframe = "1.1.1"
 libcosmic = { git = "https://github.com/pop-os/libcosmic", default-features = false }
 libsystemd = { version = "0.7", optional = true }
 log-panics = { version = "2", features = ["with-backtrace"] }
-ordered-float = "5.1"
 png = "0.18"
 regex = "1"
 ron = "0.12"

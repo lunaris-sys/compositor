@@ -844,7 +844,6 @@ dependencies = [
  "futures-util",
  "i18n-embed",
  "i18n-embed-fl",
- "iced_tiny_skia",
  "id_tree",
  "indexmap 2.13.0",
  "jiff",
@@ -856,7 +855,6 @@ dependencies = [
  "logind-zbus",
  "lunaris-theme",
  "notify 7.0.0",
- "ordered-float",
  "parking_lot",
  "png 0.18.1",
  "profiling",
@@ -3924,15 +3922,6 @@ checksum = "52ad2c6bae700b7aa5d1cc30c59bdd3a1c180b09dbaea51e2ae2b8e1cf211fdd"
 dependencies = [
  "libc",
  "libredox",
-]
-
-[[package]]
-name = "ordered-float"
-version = "5.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]

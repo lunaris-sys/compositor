@@ -528,24 +528,9 @@ impl CosmicWindow {
             geo.size = geo.size.clamp(Size::default(), max_size.to_f64());
         }
 
-        if (has_ssd || clip) && !is_maximized {
-            let window_key =
-                CosmicMappedKey(CosmicMappedKeyInner::Window(Arc::downgrade(&self.inner)));
-
-            let border_color = crate::theme::lunaris_theme().border;
-            let [r, g, b, a] = border_color;
-            let elem = CosmicWindowRenderElement::Border(IndicatorShader::element(
-                renderer,
-                Key::Window(Usage::Border, window_key.clone()),
-                geo.to_i32_round().as_local(),
-                1,
-                radii,
-                a * alpha,
-                scale.x,
-                [r, g, b],
-            ));
-            elements.push(elem);
-        }
+        // Window border removed: desktop-shell handles all window chrome
+        // via the shell overlay protocol. The previous 1px border used
+        // lt.border (#e2e2e8) which appeared white on dark backgrounds.
 
         let window_elements = {
             let p = self.p();

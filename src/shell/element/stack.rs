@@ -817,21 +817,9 @@ impl CosmicStack {
             let window_key =
                 CosmicMappedKey(CosmicMappedKeyInner::Stack(Arc::downgrade(&self.inner)));
 
-            let border = (!maximized).then(|| {
-                let [r, g, b, a] = lt.border;
-                CosmicStackRenderElement::Border(IndicatorShader::element(
-                    renderer,
-                    Key::Window(Usage::Border, window_key.clone()),
-                    geo.to_i32_round().as_local(),
-                    1,
-                    radii.unwrap_or([0, 0, 0, 0]),
-                    a * alpha,
-                    scale.x,
-                    [r, g, b],
-                ))
-            });
-
-            border.into_iter().chain(
+            // Stack border removed: desktop-shell handles all window chrome
+            // via the shell overlay protocol.
+            std::iter::empty().chain(
                 windows[active]
                     .render_elements::<R, WaylandSurfaceRenderElement<R>>(
                         renderer,

@@ -22,8 +22,8 @@ pub enum WorkspaceMode {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkspaceLayout {
-    #[default]
     Vertical,
+    #[default]
     Horizontal,
 }
 

@@ -159,10 +159,18 @@ pub fn init_backend(
     let output = Output::new(name, props);
     output.add_mode(mode);
     output.set_preferred(mode);
+    let scale_factor = backend.scale_factor();
+    tracing::info!("winit: output scale_factor={scale_factor} size={}x{}", size.w, size.h);
+    let scale = if (scale_factor - scale_factor.round()).abs() < f64::EPSILON && scale_factor >= 1.0
+    {
+        Scale::Integer(scale_factor as i32)
+    } else {
+        Scale::Fractional(scale_factor)
+    };
     output.change_current_state(
         Some(mode),
         Some(Transform::Flipped180),
-        Some(Scale::Integer(1)),
+        Some(scale),
         Some((0, 0).into()),
     );
     output.user_data().insert_if_missing(|| {
@@ -315,12 +323,23 @@ impl State {
                     }
                 }
             }
-            WinitEvent::Resized { size, .. } => {
+            WinitEvent::Resized {
+                size,
+                scale_factor,
+            } => {
                 let winit_state = self.backend.winit();
                 let output = &winit_state.output;
                 let mode = Mode {
                     size,
                     refresh: 60_000,
+                };
+
+                let scale = if (scale_factor - scale_factor.round()).abs() < f64::EPSILON
+                    && scale_factor >= 1.0
+                {
+                    Some(Scale::Integer(scale_factor as i32))
+                } else {
+                    Some(Scale::Fractional(scale_factor))
                 };
 
                 {
@@ -333,7 +352,7 @@ impl State {
                 }
                 output.delete_mode(output.current_mode().unwrap());
                 output.set_preferred(mode);
-                output.change_current_state(Some(mode), None, None, None);
+                output.change_current_state(Some(mode), None, scale, None);
                 layer_map_for_output(output).arrange();
                 self.common.output_configuration_state.update();
                 render_ping.ping();

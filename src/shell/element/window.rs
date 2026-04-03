@@ -835,6 +835,10 @@ impl PointerTarget<State> for CosmicWindow {
 
     fn button(&self, seat: &Seat<State>, _data: &mut State, event: &ButtonEvent) {
         let current_focus = self.p().current_focus();
+        tracing::info!(
+            "CosmicWindow::button focus={:?} button=0x{:x} state={:?}",
+            current_focus, event.button, event.state,
+        );
         match current_focus {
             Some(Focus::Header) => {
                 // Left click: drag start

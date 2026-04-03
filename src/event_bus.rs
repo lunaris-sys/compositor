@@ -25,6 +25,8 @@ pub struct EventBusMessage(pub Vec<u8>);
 pub struct EventBusHandle {
     sender: SyncSender<EventBusMessage>,
     session_id: String,
+    /// Last app_id emitted for window.focused, used to deduplicate.
+    last_focused_app_id: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl EventBusHandle {
@@ -39,7 +41,16 @@ impl EventBusHandle {
     }
 
     /// Emit a `window.focused` event with the given app ID.
+    ///
+    /// Deduplicated: only emits if the app_id changed since the last call.
     pub fn emit_window_focused(&self, app_id: &str) {
+        {
+            let mut last = self.last_focused_app_id.lock().unwrap();
+            if *last == app_id {
+                return;
+            }
+            *last = app_id.to_string();
+        }
         let event = Event {
             id: uuid::Uuid::now_v7().to_string(),
             r#type: "window.focused".to_string(),
@@ -122,7 +133,11 @@ pub fn spawn() -> EventBusHandle {
         .name("event-bus-sender".to_string())
         .spawn(move || sender_thread(&socket_path, rx))
         .expect("failed to spawn event-bus sender thread");
-    EventBusHandle { sender: tx, session_id }
+    EventBusHandle {
+        sender: tx,
+        session_id,
+        last_focused_app_id: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+    }
 }
 
 fn sender_thread(socket_path: &str, rx: mpsc::Receiver<EventBusMessage>) {

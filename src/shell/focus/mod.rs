@@ -207,13 +207,25 @@ impl Shell {
         }
 
         // Emit window.focused event to the Lunaris Event Bus.
-        {
-            let app_id = match target {
-                Some(KeyboardFocusTarget::Element(mapped)) => mapped.active_window().app_id(),
-                _ => String::from("unknown"),
-            };
-            state.common.event_bus.emit_window_focused(&app_id);
-        }
+        let app_id = match target {
+            Some(KeyboardFocusTarget::Element(mapped)) => mapped.active_window().app_id(),
+            Some(KeyboardFocusTarget::Fullscreen(s)) => format!("fullscreen:{:?}", s),
+            Some(KeyboardFocusTarget::Group(_)) => "group".to_string(),
+            Some(KeyboardFocusTarget::Popup(_)) => "popup".to_string(),
+            Some(KeyboardFocusTarget::LockSurface(_)) => "lock".to_string(),
+            Some(KeyboardFocusTarget::LayerSurface(_)) => "layer".to_string(),
+            None => "none".to_string(),
+        };
+        let old_focus = seat.get_keyboard().unwrap().current_focus();
+        let old_app_id = match old_focus.as_ref() {
+            Some(KeyboardFocusTarget::Element(mapped)) => mapped.active_window().app_id(),
+            _ => "none".to_string(),
+        };
+        tracing::info!(
+            "set_focus: {} -> {} update_cursor={}",
+            old_app_id, app_id, update_cursor,
+        );
+        state.common.event_bus.emit_window_focused(&app_id);
         update_focus_state(seat, target, state, serial, update_cursor);
 
         state.common.shell.write().update_active();

@@ -299,6 +299,28 @@ impl State {
                                 keyboard.modifier_state().num_lock;
                         }
                     }
+
+                    // Super-tap detection: open Waypointer on Super press+release
+                    // without any other key in between.
+                    {
+                        // evdev KEY_LEFTMETA = 125, KEY_RIGHTMETA = 126
+                        let is_super =
+                            keycode == Keycode::new(125) || keycode == Keycode::new(126);
+
+                        if is_super && state == KeyState::Pressed {
+                            // Super pressed: start tracking.
+                            self.common.super_tap_pending = true;
+                        } else if is_super && state == KeyState::Released
+                            && self.common.super_tap_pending
+                        {
+                            // Super released with no intervening key: open Waypointer.
+                            self.common.super_tap_pending = false;
+                            self.common.shell_overlay_state.send_waypointer_open();
+                        } else if state == KeyState::Pressed && !is_super {
+                            // Any other key pressed: cancel the Super tap.
+                            self.common.super_tap_pending = false;
+                        }
+                    }
                 }
             }
 

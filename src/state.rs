@@ -280,6 +280,10 @@ pub struct Common {
     pub xdg_decoration_state: XdgDecorationState,
     pub overlap_notify_state: OverlapNotifyState,
     pub shell_overlay_state: ShellOverlayState,
+    /// True while Super was pressed alone with no other key in between.
+    /// Reset on any non-modifier key press. On Super release with this
+    /// flag still set, Waypointer opens.
+    pub super_tap_pending: bool,
     /// Pending context menu callbacks keyed by menu_id.
     /// Populated by MenuGrab when a menu is sent to the shell.
     pub pending_menu_callbacks: HashMap<u32, Vec<crate::shell::grabs::menu::Item>>,
@@ -786,6 +790,7 @@ impl State {
                 output_power_state,
                 overlap_notify_state,
                 shell_overlay_state,
+                super_tap_pending: false,
                 pending_menu_callbacks: HashMap::new(),
                 presentation_state,
                 primary_selection_state,

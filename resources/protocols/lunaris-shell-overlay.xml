@@ -292,6 +292,16 @@
       <arg name="action" type="uint" enum="window_header_action_type" summary="which button was pressed"/>
     </request>
 
+    <!-- ===== Waypointer ===== -->
+
+    <event name="waypointer_open">
+      <description summary="open the Waypointer launcher overlay">
+        Sent when the user taps the Super key (press and release without
+        any other key in between). The desktop-shell should open the
+        Waypointer overlay.
+      </description>
+    </event>
+
     <!-- ===== Window Actions Enum ===== -->
 
     <enum name="window_action">

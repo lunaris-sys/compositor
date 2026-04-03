@@ -324,6 +324,13 @@ impl ShellOverlayState {
             instance.window_header_hide(surface_id);
         }
     }
+
+    /// Notify connected shells to open the Waypointer launcher.
+    pub fn send_waypointer_open(&self) {
+        for instance in &self.instances {
+            instance.waypointer_open();
+        }
+    }
 }
 
 // ===== Menu item types =====

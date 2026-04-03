@@ -136,19 +136,27 @@ impl Focus {
         header_height: i32,
         location: Point<f64, Logical>,
     ) -> Option<Focus> {
+        // Corner tolerance: diagonal resize triggers when the pointer is
+        // within this many pixels of a corner along both axes.
+        const CORNER: i32 = 8;
+
         let geo = surface.geometry();
         let loc = location.to_i32_round::<i32>() - geo.loc;
-        if loc.y < 0 && loc.x < 0 {
+        let bottom = header_height + geo.size.h;
+
+        // Corners first (checked with tolerance zone).
+        if loc.y < CORNER && loc.x < CORNER {
             Some(Focus::ResizeTopLeft)
-        } else if loc.y < 0 && loc.x >= geo.size.w {
+        } else if loc.y < CORNER && loc.x >= geo.size.w - CORNER {
             Some(Focus::ResizeTopRight)
+        } else if loc.y >= bottom - CORNER && loc.x < CORNER {
+            Some(Focus::ResizeBottomLeft)
+        } else if loc.y >= bottom - CORNER && loc.x >= geo.size.w - CORNER {
+            Some(Focus::ResizeBottomRight)
+        // Edges (only outside the window geometry, no tolerance overlap).
         } else if loc.y < 0 {
             Some(Focus::ResizeTop)
-        } else if loc.y >= header_height + geo.size.h && loc.x < 0 {
-            Some(Focus::ResizeBottomLeft)
-        } else if loc.y >= header_height + geo.size.h && loc.x >= geo.size.w {
-            Some(Focus::ResizeBottomRight)
-        } else if loc.y >= header_height + geo.size.h {
+        } else if loc.y >= bottom {
             Some(Focus::ResizeBottom)
         } else if loc.x < 0 {
             Some(Focus::ResizeLeft)

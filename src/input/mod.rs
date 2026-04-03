@@ -212,6 +212,7 @@ impl State {
 
                     let keycode = event.key_code();
                     let state = event.state();
+                    tracing::info!("key: keycode={:?} state={:?}", keycode, state);
                     trace!(?keycode, ?state, "key");
 
                     let serial = SERIAL_COUNTER.next_serial();
@@ -303,21 +304,25 @@ impl State {
                     // Super-tap detection: open Waypointer on Super press+release
                     // without any other key in between.
                     {
-                        // evdev KEY_LEFTMETA = 125, KEY_RIGHTMETA = 126
+                        // XKB keycode = evdev + 8: KEY_LEFTMETA=125+8=133, KEY_RIGHTMETA=126+8=134
                         let is_super =
-                            keycode == Keycode::new(125) || keycode == Keycode::new(126);
+                            keycode == Keycode::new(133) || keycode == Keycode::new(134);
 
                         if is_super && state == KeyState::Pressed {
-                            // Super pressed: start tracking.
                             self.common.super_tap_pending = true;
+                            tracing::info!("super_tap: PENDING (Super pressed, keycode={:?})", keycode);
                         } else if is_super && state == KeyState::Released
                             && self.common.super_tap_pending
                         {
-                            // Super released with no intervening key: open Waypointer.
                             self.common.super_tap_pending = false;
+                            tracing::info!("super_tap: FIRE waypointer_open");
                             self.common.shell_overlay_state.send_waypointer_open();
+                        } else if is_super && state == KeyState::Released {
+                            tracing::info!("super_tap: Super released but pending={}", self.common.super_tap_pending);
                         } else if state == KeyState::Pressed && !is_super {
-                            // Any other key pressed: cancel the Super tap.
+                            if self.common.super_tap_pending {
+                                tracing::info!("super_tap: CANCELLED by keycode={:?}", keycode);
+                            }
                             self.common.super_tap_pending = false;
                         }
                     }

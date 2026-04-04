@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::state::State;
+use crate::state::{BackendData, State};
 use crate::wayland::protocols::a11y::A11yHandler;
 use anyhow::{Context, Result, anyhow};
 use cosmic_comp_config::NumlockState;
@@ -46,6 +46,14 @@ pub fn init_backend_auto(
     };
 
     if res.is_ok() {
+        // Mark as nested when running inside another compositor (Winit/X11).
+        // The host compositor already applies XKB layout transformation,
+        // so we must not double-transform key events.
+        state.common.config.nested = matches!(
+            state.backend,
+            BackendData::Winit(_) | BackendData::X11(_)
+        );
+
         let output = state
             .common
             .shell

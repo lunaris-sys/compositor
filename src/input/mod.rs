@@ -316,6 +316,20 @@ impl State {
                         {
                             self.common.super_tap_pending = false;
                             tracing::info!("super_tap: FIRE waypointer_open");
+
+                            // Re-send the Super release through the keyboard so
+                            // clients and the internal modifier tracker see it.
+                            // This clears stuck logo modifier in nested setups.
+                            let kb = seat.get_keyboard().unwrap();
+                            kb.input(
+                                self,
+                                keycode,
+                                KeyState::Released,
+                                serial,
+                                time,
+                                |_, _, _| FilterResult::<()>::Forward,
+                            );
+
                             self.common.shell_overlay_state.send_waypointer_open();
                         } else if is_super && state == KeyState::Released {
                             tracing::info!("super_tap: Super released but pending={}", self.common.super_tap_pending);

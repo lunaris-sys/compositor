@@ -213,6 +213,10 @@ pub fn create_seat(
     // So instead of doing the right thing (and initialize these capabilities as matching
     // devices appear), we have to surrender to reality and just always expose a keyboard and pointer.
     let conf = config.xkb_config();
+    tracing::info!(
+        "seat keyboard init: layout={:?} variant={:?} model={:?} rules={:?} options={:?}",
+        conf.layout, conf.variant, conf.model, conf.rules, conf.options,
+    );
     seat.add_keyboard(
         xkb_config_to_wl(&conf),
         (conf.repeat_delay as i32).abs(),

@@ -72,6 +72,10 @@ pub struct Config {
     pub tiling_exceptions: Vec<ApplicationException>,
     /// System actions from `com.system76.CosmicSettings.Shortcuts`
     pub system_actions: BTreeMap<shortcuts::action::System, String>,
+    /// True when running nested inside another Wayland compositor (Winit/X11 backend).
+    /// When nested, the host compositor already applies the XKB layout so we
+    /// must not apply our own on top (double transformation).
+    pub nested: bool,
 }
 
 #[derive(Debug)]
@@ -344,6 +348,7 @@ impl Config {
             shortcuts,
             system_actions,
             tiling_exceptions,
+            nested: false,
         }
     }
 
@@ -624,7 +629,67 @@ impl Config {
     }
 
     pub fn xkb_config(&self) -> XkbConfig {
-        self.cosmic_conf.xkb_config.clone()
+        // When running nested (Winit/X11 backend), the host compositor already
+        // applies the XKB layout. Using an empty config makes xkbcommon produce
+        // a passthrough keymap that preserves the host's keysyms.
+        if self.nested {
+            tracing::info!("xkb_config: nested mode, using passthrough (empty) layout");
+            return XkbConfig::default();
+        }
+
+        let mut cfg = self.cosmic_conf.xkb_config.clone();
+        // If the layout is empty (no cosmic-config or TOML config set it),
+        // fall back to environment variables, then /etc/vconsole.conf.
+        if cfg.layout.is_empty() {
+            if let Ok(layout) = std::env::var("XKB_DEFAULT_LAYOUT") {
+                cfg.layout = layout;
+            }
+        }
+        if cfg.variant.is_empty() {
+            if let Ok(variant) = std::env::var("XKB_DEFAULT_VARIANT") {
+                cfg.variant = variant;
+            }
+        }
+        if cfg.model.is_empty() {
+            if let Ok(model) = std::env::var("XKB_DEFAULT_MODEL") {
+                cfg.model = model;
+            }
+        }
+        if cfg.rules.is_empty() {
+            if let Ok(rules) = std::env::var("XKB_DEFAULT_RULES") {
+                cfg.rules = rules;
+            }
+        }
+        if cfg.options.is_none() {
+            if let Ok(options) = std::env::var("XKB_DEFAULT_OPTIONS") {
+                if !options.is_empty() {
+                    cfg.options = Some(options);
+                }
+            }
+        }
+        // If still empty, try localectl (systemd) which reads the full X11 config.
+        if cfg.layout.is_empty() {
+            let system = read_system_xkb_layout();
+            if !system.layout.is_empty() {
+                cfg.layout = system.layout;
+            }
+            if cfg.variant.is_empty() && !system.variant.is_empty() {
+                cfg.variant = system.variant;
+            }
+            if cfg.model.is_empty() && !system.model.is_empty() {
+                cfg.model = system.model;
+            }
+            if cfg.options.is_none() && !system.options.is_empty() {
+                cfg.options = Some(system.options);
+            }
+        }
+        // Last resort: /etc/vconsole.conf KEYMAP field.
+        if cfg.layout.is_empty() {
+            if let Some(vconsole) = parse_vconsole_keymap() {
+                cfg.layout = vconsole;
+            }
+        }
+        cfg
     }
 
     pub fn read_device(&self, device: &mut InputDevice) {
@@ -750,6 +815,80 @@ impl DynamicConfig {
     }
 }
 
+/// Reads the system XKB layout from `localectl status`.
+///
+/// Parses lines like:
+///   X11 Layout: de
+///   X11 Variant: nodeadkeys
+///   X11 Model: pc105
+///   X11 Options: compose:ralt
+struct SystemXkb {
+    layout: String,
+    variant: String,
+    model: String,
+    options: String,
+}
+
+fn read_system_xkb_layout() -> SystemXkb {
+    let mut result = SystemXkb {
+        layout: String::new(),
+        variant: String::new(),
+        model: String::new(),
+        options: String::new(),
+    };
+
+    let output = match std::process::Command::new("localectl")
+        .arg("status")
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return result,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("X11 Layout:") {
+            result.layout = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("X11 Variant:") {
+            result.variant = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("X11 Model:") {
+            result.model = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("X11 Options:") {
+            result.options = v.trim().to_string();
+        }
+    }
+
+    if !result.layout.is_empty() {
+        tracing::info!(
+            "read_system_xkb_layout: layout={} variant={} model={} options={}",
+            result.layout, result.variant, result.model, result.options,
+        );
+    }
+
+    result
+}
+
+/// Reads the KEYMAP setting from /etc/vconsole.conf.
+///
+/// Returns the layout string (e.g. "de", "us") or None if not found.
+fn parse_vconsole_keymap() -> Option<String> {
+    let content = std::fs::read_to_string("/etc/vconsole.conf").ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("KEYMAP=") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn xkb_config_to_wl(config: &XkbConfig) -> WlXkbConfig<'_> {
     WlXkbConfig {
         rules: &config.rules,
@@ -822,6 +961,10 @@ fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
                 keyboard.change_repeat_info(
                     (value.repeat_rate as i32).abs(),
                     (value.repeat_delay as i32).abs(),
+                );
+                tracing::info!(
+                    "xkb_config update: layout={:?} variant={:?} model={:?} options={:?}",
+                    value.layout, value.variant, value.model, value.options,
                 );
                 if let Err(err) = keyboard.set_xkb_config(state, xkb_config_to_wl(value)) {
                     error!(?err, "Failed to load provided xkb config");

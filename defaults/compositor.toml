@@ -1,0 +1,44 @@
+# Lunaris Compositor Configuration
+# System defaults. User overrides in ~/.config/lunaris/compositor.toml
+
+[keyboard]
+layout = ""        # XKB layout (e.g. "us", "de"). Empty = system default
+model = ""         # XKB model
+variant = ""       # XKB variant
+options = ""       # XKB options (e.g. "ctrl:nocaps")
+repeat_rate = 25   # Keys per second
+repeat_delay = 600 # Milliseconds before repeat starts
+
+[input.mouse]
+natural_scroll = false
+accel_profile = "adaptive"   # "adaptive" or "flat"
+
+[input.touchpad]
+natural_scroll = true
+tap_to_click = true
+two_finger_scroll = true
+scroll_method = "two-finger" # "two-finger", "edge", or "none"
+
+[workspaces]
+count = 4
+layout = "horizontal"        # "horizontal" or "vertical"
+
+[appearance]
+gaps_inner = 4
+gaps_outer = 4
+active_hint = true
+active_hint_color = "#6366f1"
+border_radius = 8
+
+[cursor]
+theme = "Adwaita"
+size = 24
+
+[animation]
+enabled = true
+workspace_switch_duration = 250  # ms
+
+[tiling]
+autotile = false
+focus_follows_cursor = false
+cursor_follows_focus = false

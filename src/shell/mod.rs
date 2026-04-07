@@ -85,6 +85,7 @@ use crate::{
 
 pub mod element;
 pub mod focus;
+pub mod fullscreen_reveal;
 pub mod grabs;
 pub mod layout;
 mod seats;
@@ -1499,6 +1500,114 @@ impl Common {
         self.toplevel_info_state.refresh(&self.workspace_state);
         self.refresh_idle_inhibit();
         self.a11y_keyboard_monitor_state.refresh();
+        self.refresh_titlebar_modes();
+        self.tick_fullscreen_reveal_timer();
+    }
+
+    /// Check all surfaces with active titlebar bindings and send
+    /// `mode_changed` events if the window mode has changed.
+    pub fn refresh_titlebar_modes(&mut self) {
+        use crate::wayland::handlers::titlebar::state_to_json;
+        use smithay::reexports::wayland_server::Resource;
+
+        // Collect surface IDs with active titlebar bindings.
+        let surface_ids: Vec<u64> = self
+            .titlebar_manager_state
+            .active_surface_ids()
+            .collect();
+
+        if surface_ids.is_empty() {
+            return;
+        }
+
+        let shell = self.shell.read();
+
+        for sid in surface_ids {
+            // Determine current window state by searching workspaces.
+            let mut is_fullscreen = false;
+            let mut is_tiled = false;
+            let mut found = false;
+
+            'outer: for workspace in shell.workspaces.spaces() {
+                // Check fullscreen surface.
+                if let Some(ref fs) = workspace.fullscreen {
+                    if let Some(wl) = fs.surface.wl_surface() {
+                        if wl.id().protocol_id() as u64 == sid {
+                            is_fullscreen = true;
+                            found = true;
+                            break 'outer;
+                        }
+                    }
+                }
+                // Check tiling layer.
+                for (mapped, _) in workspace.tiling_layer.mapped() {
+                    for (surface, _) in mapped.windows() {
+                        if let Some(wl) = surface.wl_surface() {
+                            if wl.id().protocol_id() as u64 == sid {
+                                is_tiled = true;
+                                found = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                // Check floating layer.
+                for mapped in workspace.floating_layer.mapped() {
+                    for (surface, _) in mapped.windows() {
+                        if let Some(wl) = surface.wl_surface() {
+                            if wl.id().protocol_id() as u64 == sid {
+                                // Floating: is_tiled = false, is_fullscreen = false.
+                                found = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !found {
+                continue;
+            }
+
+            let mode = if is_fullscreen {
+                crate::wayland::protocols::titlebar::TitlebarMode::Fullscreen
+            } else if is_tiled {
+                crate::wayland::protocols::titlebar::TitlebarMode::Tiled
+            } else {
+                crate::wayland::protocols::titlebar::TitlebarMode::Floating
+            };
+
+            if self.titlebar_manager_state.send_mode_changed(sid, mode) {
+                // Mode changed; also notify the shell.
+                if let Some(tb) = self.titlebar_manager_state.get(sid) {
+                    let json = state_to_json(tb);
+                    self.shell_overlay_state
+                        .send_window_header_content(sid as u32, json);
+                }
+            }
+        }
+    }
+
+    /// Check the fullscreen reveal hide timer even when no pointer events
+    /// arrive. Without this, a stationary pointer would leave the state
+    /// machine stuck in `HidePending` forever.
+    pub fn tick_fullscreen_reveal_timer(&mut self) {
+        use crate::shell::fullscreen_reveal::{RevealAction, RevealPhase};
+
+        if self.fullscreen_reveal.phase != RevealPhase::HidePending {
+            return;
+        }
+
+        // Tick with the same pointer_y that caused the leave (outside
+        // titlebar). The exact value does not matter as long as it is
+        // above the titlebar threshold (36px).
+        let prev_sid = self.fullscreen_reveal.surface_id;
+        let action = self.fullscreen_reveal.update(100.0, true, prev_sid);
+        if action == RevealAction::Hide {
+            let hide_sid = if prev_sid != 0 { prev_sid } else { 0 };
+            self.shell_overlay_state
+                .send_fullscreen_titlebar_hide(hide_sid);
+        }
     }
 
     pub fn refresh_idle_inhibit(&mut self) {

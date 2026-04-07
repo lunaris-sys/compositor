@@ -23,6 +23,7 @@ use crate::{
             output_power::OutputPowerState,
             overlap_notify::OverlapNotifyState,
             shell_overlay::{ShellOverlayHandler, ShellOverlayState},
+            titlebar::TitlebarManagerState,
             toplevel_info::ToplevelInfoState,
             toplevel_management::{ManagementCapabilities, ToplevelManagementState},
             workspace::{WorkspaceState, WorkspaceUpdateGuard},
@@ -280,6 +281,9 @@ pub struct Common {
     pub xdg_decoration_state: XdgDecorationState,
     pub overlap_notify_state: OverlapNotifyState,
     pub shell_overlay_state: ShellOverlayState,
+    pub titlebar_manager_state: TitlebarManagerState,
+    /// Fullscreen titlebar edge-reveal state machine.
+    pub fullscreen_reveal: crate::shell::fullscreen_reveal::FullscreenRevealState,
     /// True while Super was pressed alone with no other key in between.
     /// Reset on any non-modifier key press. On Super release with this
     /// flag still set, Waypointer opens.
@@ -660,6 +664,7 @@ impl State {
             OverlapNotifyState::new::<Self, _>(dh, client_has_no_security_context);
         let shell_overlay_state =
             ShellOverlayState::new::<Self, _>(dh, client_has_no_security_context);
+        let titlebar_manager_state = TitlebarManagerState::new(dh);
         let presentation_state = PresentationState::new::<Self>(dh, clock.id() as u32);
         let primary_selection_state = PrimarySelectionState::new::<Self>(dh);
         let cosmic_image_capture_source_state =
@@ -790,6 +795,8 @@ impl State {
                 output_power_state,
                 overlap_notify_state,
                 shell_overlay_state,
+                titlebar_manager_state,
+                fullscreen_reveal: Default::default(),
                 super_tap_pending: false,
                 pending_menu_callbacks: HashMap::new(),
                 presentation_state,

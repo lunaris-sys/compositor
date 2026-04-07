@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="lunaris_titlebar_v1">
+  <copyright>
+    Copyright (C) 2026 Lunaris OS Contributors
+    SPDX-License-Identifier: GPL-3.0-only
+  </copyright>
+
+  <description summary="Lunaris titlebar content declaration protocol">
+    This protocol allows applications to declare titlebar content (tabs,
+    buttons, breadcrumbs, search) while the compositor decides how and
+    where to render it based on the window mode (floating, tiled,
+    fullscreen, frameless).
+
+    Core principle: App declares WHAT, compositor decides HOW.
+  </description>
+
+  <!-- ================================================================== -->
+  <!-- Manager global: binds to a surface to get a per-window titlebar    -->
+  <!-- ================================================================== -->
+
+  <interface name="lunaris_titlebar_manager_v1" version="1">
+    <description summary="factory for per-window titlebar interfaces">
+      Global singleton. Clients call get_titlebar to obtain a
+      lunaris_titlebar_v1 object tied to a specific wl_surface.
+    </description>
+
+    <request name="get_titlebar">
+      <description summary="create a titlebar interface for a surface">
+        Creates a lunaris_titlebar_v1 object bound to the given surface.
+        Only one titlebar object per surface is allowed.
+      </description>
+      <arg name="id" type="new_id" interface="lunaris_titlebar_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+  </interface>
+
+  <!-- ================================================================== -->
+  <!-- Per-window titlebar interface                                       -->
+  <!-- ================================================================== -->
+
+  <interface name="lunaris_titlebar_v1" version="1">
+    <description summary="per-window titlebar content declaration">
+      Bound to a single wl_surface. The client uses requests to declare
+      titlebar content; the compositor sends events when the user
+      interacts with that content.
+    </description>
+
+    <!-- Enums -->
+
+    <enum name="mode">
+      <description summary="window display mode"/>
+      <entry name="floating" value="0" summary="floating window with full titlebar"/>
+      <entry name="tiled" value="1" summary="tiled window with compact titlebar"/>
+      <entry name="fullscreen" value="2" summary="fullscreen, titlebar auto-hides"/>
+      <entry name="frameless" value="3" summary="no titlebar (app draws own chrome)"/>
+    </enum>
+
+    <enum name="center_content">
+      <description summary="what occupies the center region of the titlebar"/>
+      <entry name="none" value="0" summary="empty center"/>
+      <entry name="tabs" value="1" summary="tab bar"/>
+      <entry name="search" value="2" summary="search field"/>
+      <entry name="segmented" value="3" summary="segmented control"/>
+    </enum>
+
+    <enum name="tab_status">
+      <description summary="visual status of a tab"/>
+      <entry name="normal" value="0" summary="no indicator"/>
+      <entry name="modified" value="1" summary="unsaved changes dot"/>
+      <entry name="pinned" value="2" summary="pinned (no close button)"/>
+    </enum>
+
+    <enum name="button_position">
+      <description summary="which side of the titlebar a custom button appears"/>
+      <entry name="left" value="0"/>
+      <entry name="right" value="1"/>
+    </enum>
+
+    <!-- ============================================================== -->
+    <!-- Requests (client -> compositor)                                 -->
+    <!-- ============================================================== -->
+
+    <request name="set_title">
+      <description summary="set the window title"/>
+      <arg name="title" type="string"/>
+    </request>
+
+    <request name="set_breadcrumb">
+      <description summary="set breadcrumb path (JSON array of {label, action?})"/>
+      <arg name="segments_json" type="string"/>
+    </request>
+
+    <request name="set_center_content">
+      <description summary="choose what fills the center region"/>
+      <arg name="content" type="uint" enum="center_content"/>
+    </request>
+
+    <request name="add_tab">
+      <description summary="add a tab to the tab bar"/>
+      <arg name="id" type="string"/>
+      <arg name="title" type="string"/>
+      <arg name="icon" type="string" allow-null="true"/>
+      <arg name="status" type="uint" enum="tab_status"/>
+    </request>
+
+    <request name="remove_tab">
+      <description summary="remove a tab"/>
+      <arg name="id" type="string"/>
+    </request>
+
+    <request name="update_tab">
+      <description summary="update a tab's title and status"/>
+      <arg name="id" type="string"/>
+      <arg name="title" type="string"/>
+      <arg name="status" type="uint" enum="tab_status"/>
+    </request>
+
+    <request name="activate_tab">
+      <description summary="tell the compositor which tab is active"/>
+      <arg name="id" type="string"/>
+    </request>
+
+    <request name="reorder_tabs">
+      <description summary="reorder tabs (JSON array of tab IDs)"/>
+      <arg name="ids_json" type="string"/>
+    </request>
+
+    <request name="add_button">
+      <description summary="add a custom button to the titlebar"/>
+      <arg name="id" type="string"/>
+      <arg name="icon" type="string"/>
+      <arg name="tooltip" type="string"/>
+      <arg name="position" type="uint" enum="button_position"/>
+    </request>
+
+    <request name="remove_button">
+      <description summary="remove a custom button"/>
+      <arg name="id" type="string"/>
+    </request>
+
+    <request name="set_button_enabled">
+      <description summary="enable or disable a button (greyed out when disabled)"/>
+      <arg name="id" type="string"/>
+      <arg name="enabled" type="uint" summary="0 = disabled, 1 = enabled"/>
+    </request>
+
+    <request name="set_search_mode">
+      <description summary="enter or leave search mode"/>
+      <arg name="enabled" type="uint" summary="0 = off, 1 = on"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+
+    <!-- ============================================================== -->
+    <!-- Events (compositor -> client)                                   -->
+    <!-- ============================================================== -->
+
+    <event name="mode_changed">
+      <description summary="compositor informs app of current window mode">
+        Sent when the window mode changes (e.g. user tiles the window).
+        The app may adjust its content declarations accordingly.
+      </description>
+      <arg name="mode" type="uint" enum="mode"/>
+    </event>
+
+    <event name="tab_activated">
+      <description summary="user clicked a tab"/>
+      <arg name="id" type="string"/>
+    </event>
+
+    <event name="tab_closed">
+      <description summary="user closed a tab (clicked X)"/>
+      <arg name="id" type="string"/>
+    </event>
+
+    <event name="tab_reordered">
+      <description summary="user reordered tabs via drag">
+        Sends the new tab order as a JSON array of IDs.
+      </description>
+      <arg name="ids_json" type="string"/>
+    </event>
+
+    <event name="button_clicked">
+      <description summary="user clicked a custom button"/>
+      <arg name="id" type="string"/>
+    </event>
+
+    <event name="breadcrumb_clicked">
+      <description summary="user clicked a breadcrumb segment"/>
+      <arg name="index" type="uint"/>
+      <arg name="action" type="string" allow-null="true"/>
+    </event>
+
+    <event name="search_changed">
+      <description summary="user typed in the search field"/>
+      <arg name="query" type="string"/>
+    </event>
+
+    <event name="keyboard_action">
+      <description summary="keyboard shortcut for tab management">
+        Sent when the compositor intercepts a titlebar-scoped shortcut
+        (e.g. Ctrl+Tab, Ctrl+W). The action string matches the
+        keybindings.toml [titlebar] action format.
+      </description>
+      <arg name="action" type="string"/>
+    </event>
+
+  </interface>
+</protocol>

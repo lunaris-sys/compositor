@@ -8,6 +8,7 @@ pub mod output_configuration;
 pub mod output_power;
 pub mod overlap_notify;
 pub mod shell_overlay;
+pub mod titlebar;
 pub mod toplevel_info;
 pub mod toplevel_management;
 pub mod workspace;

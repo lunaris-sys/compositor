@@ -325,6 +325,31 @@ impl ShellOverlayState {
         }
     }
 
+    /// Notify connected shells of updated titlebar content for a window.
+    ///
+    /// `content_json` is a JSON-serialized `TitlebarState` (tabs, buttons,
+    /// breadcrumbs, search mode). The shell uses this to render rich
+    /// titlebar content.
+    pub fn send_window_header_content(&self, surface_id: u32, content_json: String) {
+        for instance in &self.instances {
+            instance.window_header_content(surface_id, content_json.clone());
+        }
+    }
+
+    /// Notify connected shells to reveal the titlebar for a fullscreen window.
+    pub fn send_fullscreen_titlebar_reveal(&self, surface_id: u32) {
+        for instance in &self.instances {
+            instance.fullscreen_titlebar_reveal(surface_id);
+        }
+    }
+
+    /// Notify connected shells to hide the titlebar for a fullscreen window.
+    pub fn send_fullscreen_titlebar_hide(&self, surface_id: u32) {
+        for instance in &self.instances {
+            instance.fullscreen_titlebar_hide(surface_id);
+        }
+    }
+
     /// Notify connected shells to open the Waypointer launcher.
     pub fn send_waypointer_open(&self) {
         for instance in &self.instances {

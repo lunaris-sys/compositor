@@ -284,6 +284,17 @@
       <arg name="surface_id" type="uint" summary="surface identifier"/>
     </event>
 
+    <event name="window_header_content">
+      <description summary="titlebar content update from the lunaris-titlebar-v1 protocol">
+        Sent when an application updates its declared titlebar content
+        (tabs, buttons, breadcrumbs, search mode). The payload is a JSON
+        object matching the TitlebarState schema. The shell uses this to
+        render rich titlebar content for the given window.
+      </description>
+      <arg name="surface_id" type="uint" summary="surface identifier"/>
+      <arg name="content_json" type="string" summary="JSON-serialized TitlebarState"/>
+    </event>
+
     <request name="window_header_action">
       <description summary="user interacted with a header bar button">
         Sent by the shell when the user clicks a header bar button.
@@ -291,6 +302,26 @@
       <arg name="surface_id" type="uint" summary="surface identifier"/>
       <arg name="action" type="uint" enum="window_header_action_type" summary="which button was pressed"/>
     </request>
+
+    <!-- ===== Fullscreen Titlebar Reveal ===== -->
+
+    <event name="fullscreen_titlebar_reveal">
+      <description summary="fullscreen window: show the titlebar">
+        Sent when the pointer reaches the top edge of the screen while a
+        fullscreen window is active. The shell should animate the top bar
+        sliding in (200ms). The bar must remain visible until
+        fullscreen_titlebar_hide is received.
+      </description>
+      <arg name="surface_id" type="uint" summary="fullscreen surface identifier"/>
+    </event>
+
+    <event name="fullscreen_titlebar_hide">
+      <description summary="fullscreen window: hide the titlebar">
+        Sent after the pointer has left the titlebar area for 300ms. The
+        shell should animate the top bar sliding out (200ms).
+      </description>
+      <arg name="surface_id" type="uint" summary="fullscreen surface identifier"/>
+    </event>
 
     <!-- ===== Waypointer ===== -->
 

@@ -433,7 +433,50 @@ impl State {
                         tracing::trace!("surface_under: None");
                     }
 
+                    // Collect fullscreen info for edge-reveal before dropping
+                    // the shell lock.
+                    let fs_info: Option<(f64, bool, u32)> = shell
+                        .active_space(&output)
+                        .and_then(|ws| {
+                            let fs = ws.fullscreen.as_ref()?;
+                            let sid = fs.surface.wl_surface()
+                                .map(|wl| {
+                                    use smithay::reexports::wayland_server::Resource;
+                                    wl.id().protocol_id()
+                                })
+                                .unwrap_or(0);
+                            let pointer_y = position.y - output_geometry.loc.y as f64;
+                            Some((pointer_y, true, sid))
+                        });
+
                     std::mem::drop(shell);
+
+                    // Tick the fullscreen edge-reveal state machine.
+                    {
+                        use crate::shell::fullscreen_reveal::RevealAction;
+                        let (pointer_y, has_fs, sid) =
+                            fs_info.unwrap_or((0.0, false, 0));
+                        // Save surface_id before update() may reset it.
+                        let prev_sid = self.common.fullscreen_reveal.surface_id;
+                        let action = self.common.fullscreen_reveal.update(
+                            pointer_y, has_fs, sid,
+                        );
+                        match action {
+                            RevealAction::Reveal => {
+                                self.common
+                                    .shell_overlay_state
+                                    .send_fullscreen_titlebar_reveal(sid);
+                            }
+                            RevealAction::Hide => {
+                                let hide_sid = if prev_sid != 0 { prev_sid } else { sid };
+                                self.common
+                                    .shell_overlay_state
+                                    .send_fullscreen_titlebar_hide(hide_sid);
+                            }
+                            RevealAction::None => {}
+                        }
+                    }
+
                     ptr.relative_motion(
                         self,
                         under.clone(),
@@ -708,6 +751,37 @@ impl State {
                         },
                     );
                     ptr.frame(self);
+
+                    // Tick fullscreen edge-reveal for absolute motion.
+                    {
+                        use crate::shell::fullscreen_reveal::RevealAction;
+                        let shell_r = self.common.shell.read();
+                        let fs_info = shell_r.active_space(&output).and_then(|ws| {
+                            let fs = ws.fullscreen.as_ref()?;
+                            let sid = fs.surface.wl_surface().map(|wl| {
+                                use smithay::reexports::wayland_server::Resource;
+                                wl.id().protocol_id()
+                            }).unwrap_or(0);
+                            let pointer_y = position.y - geometry.loc.y as f64;
+                            Some((pointer_y, true, sid))
+                        });
+                        drop(shell_r);
+                        let (py, has_fs, sid) = fs_info.unwrap_or((0.0, false, 0));
+                        let prev_sid = self.common.fullscreen_reveal.surface_id;
+                        let action = self.common.fullscreen_reveal.update(py, has_fs, sid);
+                        match action {
+                            RevealAction::Reveal => {
+                                self.common.shell_overlay_state
+                                    .send_fullscreen_titlebar_reveal(sid);
+                            }
+                            RevealAction::Hide => {
+                                let hide_sid = if prev_sid != 0 { prev_sid } else { sid };
+                                self.common.shell_overlay_state
+                                    .send_fullscreen_titlebar_hide(hide_sid);
+                            }
+                            RevealAction::None => {}
+                        }
+                    }
 
                     let shell = self.common.shell.read();
                     for session in cursor_sessions_for_output(&shell, &output) {

@@ -134,6 +134,11 @@ impl SupressedButtons {
     fn remove(&self, button: u32) -> bool {
         self.0.borrow_mut().remove(&button)
     }
+
+    /// Clear all suppressed buttons (used on focus loss).
+    pub fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
 }
 
 impl ModifiersShortcutQueue {
@@ -1018,32 +1023,6 @@ impl State {
                 }
 
                 let ptr = seat.get_pointer().unwrap();
-                let is_grabbed = ptr.is_grabbed();
-                let mods = seat.get_keyboard().unwrap().modifier_state();
-                let under_target = if event.state() == ButtonState::Pressed {
-                    let shell = self.common.shell.read();
-                    let output = seat.active_output();
-                    let pos = ptr.current_location().as_global();
-                    State::element_under(pos, &output, &shell, &seat)
-                        .map(|t| format!("{:?}", t))
-                        .unwrap_or_else(|| "nothing".to_string())
-                } else {
-                    "-".to_string()
-                };
-                tracing::info!(
-                    "pointer_button: button=0x{:x} state={:?} pass_event={} is_grabbed={} logo_mod={} logo_phys={} under={}",
-                    button, event.state(), pass_event, is_grabbed,
-                    mods.logo,
-                    if mods.logo {
-                        seat.get_keyboard().unwrap().with_pressed_keysyms(|syms| {
-                            syms.iter().any(|k| {
-                                let sym = k.modified_sym();
-                                sym == Keysym::Super_L || sym == Keysym::Super_R
-                            })
-                        })
-                    } else { false },
-                    under_target,
-                );
                 if pass_event {
                     ptr.button(
                         self,

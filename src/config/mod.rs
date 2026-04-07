@@ -73,8 +73,8 @@ pub struct Config {
     /// System actions from `com.system76.CosmicSettings.Shortcuts`
     pub system_actions: BTreeMap<shortcuts::action::System, String>,
     /// True when running nested inside another Wayland compositor (Winit/X11 backend).
-    /// When nested, the host compositor already applies the XKB layout so we
-    /// must not apply our own on top (double transformation).
+    /// Note: The XKB layout is applied normally even in nested mode because
+    /// the compositor receives scancodes (not keysyms) from the host.
     pub nested: bool,
 }
 
@@ -177,26 +177,78 @@ pub enum ColorFilter {
 const DEFAULT_TOML_PATH: &str = ".config/lunaris/compositor.toml";
 
 /// Load CosmicCompConfig from a TOML file, falling back to defaults.
+///
+/// The user TOML is typically a sparse file with only the fields the
+/// user wants to override. We start from defaults and apply overrides
+/// for the sections we recognize.
 fn load_toml_config(path: &std::path::Path) -> CosmicCompConfig {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match toml::from_str::<CosmicCompConfig>(&contents) {
-            Ok(config) => {
-                tracing::info!("loaded compositor config from {}", path.display());
-                config
-            }
-            Err(err) => {
-                warn!(?err, "failed to parse compositor.toml, using defaults");
-                CosmicCompConfig::default()
-            }
-        },
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
         Err(_) => {
             tracing::info!(
                 "no compositor.toml at {}, using defaults",
                 path.display()
             );
-            CosmicCompConfig::default()
+            return CosmicCompConfig::default();
+        }
+    };
+
+    let table: toml::Table = match toml::from_str(&contents) {
+        Ok(t) => t,
+        Err(err) => {
+            warn!(?err, "failed to parse compositor.toml");
+            return CosmicCompConfig::default();
+        }
+    };
+
+    let mut config = CosmicCompConfig::default();
+
+    // Apply xkb_config overrides.
+    if let Some(xkb) = table.get("xkb_config").and_then(|v| v.as_table()) {
+        if let Some(s) = xkb.get("layout").and_then(|v| v.as_str()) {
+            config.xkb_config.layout = s.to_string();
+        }
+        if let Some(s) = xkb.get("model").and_then(|v| v.as_str()) {
+            config.xkb_config.model = s.to_string();
+        }
+        if let Some(s) = xkb.get("variant").and_then(|v| v.as_str()) {
+            config.xkb_config.variant = s.to_string();
+        }
+        if let Some(s) = xkb.get("options").and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                config.xkb_config.options = Some(s.to_string());
+            }
+        }
+        if let Some(n) = xkb.get("repeat_rate").and_then(|v| v.as_integer()) {
+            config.xkb_config.repeat_rate = n as u32;
+        }
+        if let Some(n) = xkb.get("repeat_delay").and_then(|v| v.as_integer()) {
+            config.xkb_config.repeat_delay = n as u32;
         }
     }
+
+    // Apply workspace overrides.
+    if let Some(ws) = table.get("workspaces").and_then(|v| v.as_table()) {
+        if let Some(s) = ws.get("workspace_layout").and_then(|v| v.as_str()) {
+            config.workspaces.workspace_layout = match s {
+                "Vertical" | "vertical" => cosmic_comp_config::workspace::WorkspaceLayout::Vertical,
+                _ => cosmic_comp_config::workspace::WorkspaceLayout::Horizontal,
+            };
+        }
+    }
+
+    tracing::info!(
+        "loaded compositor config from {} (xkb layout={:?})",
+        path.display(),
+        config.xkb_config.layout,
+    );
+
+    // Verify XKB layout was actually loaded.
+    if config.xkb_config.layout.is_empty() {
+        tracing::warn!("XKB layout is EMPTY after loading TOML from {}", path.display());
+    }
+
+    config
 }
 
 impl Config {
@@ -629,14 +681,6 @@ impl Config {
     }
 
     pub fn xkb_config(&self) -> XkbConfig {
-        // When running nested (Winit/X11 backend), the host compositor already
-        // applies the XKB layout. Using an empty config makes xkbcommon produce
-        // a passthrough keymap that preserves the host's keysyms.
-        if self.nested {
-            tracing::info!("xkb_config: nested mode, using passthrough (empty) layout");
-            return XkbConfig::default();
-        }
-
         let mut cfg = self.cosmic_conf.xkb_config.clone();
         // If the layout is empty (no cosmic-config or TOML config set it),
         // fall back to environment variables, then /etc/vconsole.conf.
@@ -1067,5 +1111,60 @@ impl From<Output> for CompOutputInfo {
             make: physical.make,
             model: physical.model,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_sparse_toml() {
+        let dir = std::env::temp_dir().join("lunaris-config-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-compositor.toml");
+        std::fs::write(
+            &path,
+            r#"
+[xkb_config]
+layout = "de"
+
+[workspaces]
+workspace_layout = "Horizontal"
+"#,
+        )
+        .unwrap();
+
+        let config = load_toml_config(&path);
+        assert_eq!(
+            config.xkb_config.layout, "de",
+            "layout must be 'de' from TOML"
+        );
+        // Other fields should be defaults.
+        assert_eq!(config.xkb_config.repeat_rate, 25);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_load_empty_toml() {
+        let dir = std::env::temp_dir().join("lunaris-config-test-empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-empty.toml");
+        std::fs::write(&path, "").unwrap();
+
+        let config = load_toml_config(&path);
+        // Should get defaults, no panic.
+        assert_eq!(config.xkb_config.layout, "");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_load_missing_toml() {
+        let config = load_toml_config(std::path::Path::new("/nonexistent/path.toml"));
+        assert_eq!(config.xkb_config.layout, "");
     }
 }

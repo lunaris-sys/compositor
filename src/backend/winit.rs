@@ -323,6 +323,48 @@ impl State {
                     }
                 }
             }
+            WinitEvent::Focus(false) => {
+                // Winit/host compositor focus lost. Release all pressed
+                // keys and buttons to prevent stuck modifiers and phantom
+                // grabs. This works around Smithay #1353: winit ignores
+                // the pressed-keys array in wl_keyboard::enter, so the
+                // nested compositor cannot reconcile state on re-focus.
+                let seats: Vec<_> = self.common.shell.read().seats.iter().cloned().collect();
+                for seat in seats {
+                    // Release stuck keyboard modifiers.
+                    if let Some(keyboard) = seat.get_keyboard() {
+                        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                        let time = self.common.clock.now().as_millis() as u32;
+                        // Send key release for all pressed keys. This clears
+                        // the xkbcommon modifier state.
+                        keyboard.with_pressed_keysyms(|syms| {
+                            let codes: Vec<_> = syms.iter().map(|k| k.raw_code()).collect();
+                            codes
+                        }).into_iter().for_each(|code| {
+                            keyboard.input::<(), _>(
+                                self,
+                                code,
+                                smithay::backend::input::KeyState::Released,
+                                serial,
+                                time,
+                                |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+                            );
+                        });
+                    }
+                    // Release stuck pointer buttons.
+                    if let Some(pointer) = seat.get_pointer() {
+                        if pointer.is_grabbed() {
+                            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                            let time = self.common.clock.now().as_millis() as u32;
+                            pointer.unset_grab(self, serial, time);
+                        }
+                    }
+                    // Clear suppressed buttons so they don't block future clicks.
+                    seat.supressed_buttons().clear();
+                }
+                self.common.super_tap_pending = false;
+                tracing::debug!("winit: focus lost, released all keys and buttons");
+            }
             WinitEvent::Resized {
                 size,
                 scale_factor,

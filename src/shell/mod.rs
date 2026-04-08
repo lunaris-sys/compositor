@@ -92,6 +92,7 @@ mod seats;
 mod workspace;
 pub mod zoom;
 pub use self::element::{CosmicMapped, CosmicMappedRenderElement, CosmicSurface};
+pub use self::workspace::LayoutMode;
 pub use self::seats::*;
 pub use self::workspace::*;
 use self::zoom::{OutputZoomState, ZoomState};
@@ -268,6 +269,16 @@ pub struct PendingLayer {
     pub output: Output,
 }
 
+/// State for the scratchpad: hidden floating windows that can be
+/// toggled on/off instantly with a keybinding.
+#[derive(Debug, Default)]
+pub struct ScratchpadState {
+    /// Windows stored in the scratchpad (may be hidden or visible).
+    pub windows: Vec<CosmicMapped>,
+    /// Index of the currently visible scratchpad window, or None if all hidden.
+    pub visible: Option<usize>,
+}
+
 #[derive(Debug)]
 pub struct Shell {
     pub workspaces: Workspaces,
@@ -302,6 +313,10 @@ pub struct Shell {
     zoom_state: Option<ZoomState>,
     appearance_conf: AppearanceConfig,
     tiling_exceptions: TilingExceptions,
+    /// TOML-based window rules (float/tile).
+    pub(crate) window_rules: Vec<crate::config::WindowRule>,
+    /// Scratchpad: hidden windows toggled on/off with a keybinding.
+    pub scratchpad: ScratchpadState,
 
     #[cfg(feature = "debug")]
     pub debug_active: bool,
@@ -1497,6 +1512,7 @@ impl Common {
             }
         }
         self.popups.cleanup();
+        self.shell.write().scratchpad_remove_dead();
         self.toplevel_info_state.refresh(&self.workspace_state);
         self.refresh_idle_inhibit();
         self.a11y_keyboard_monitor_state.refresh();
@@ -1706,6 +1722,8 @@ impl Shell {
             appearance_conf: config.cosmic_conf.appearance_settings,
             zoom_state: None,
             tiling_exceptions,
+            window_rules: config.layout.window_rules.clone(),
+            scratchpad: ScratchpadState::default(),
 
             #[cfg(feature = "debug")]
             debug_active: false,
@@ -2904,6 +2922,8 @@ impl Shell {
         let workspace_handle = workspace.handle;
         let is_dialog = layout::is_dialog(&window);
         let floating_exception = layout::has_floating_exception(&self.tiling_exceptions, &window);
+        // TOML window rules override built-in detection.
+        let rule_override = layout::check_window_rules(&self.window_rules, &window);
 
         if should_be_fullscreen {
             if let Some((surface, state, _)) = workspace.map_fullscreen(&window, &seat, None, None)
@@ -2944,8 +2964,19 @@ impl Shell {
         }
 
         let workspace_empty = workspace.mapped().next().is_none();
-        if is_dialog || floating_exception || !workspace.tiling_enabled {
+        // TOML rules have highest priority, then dialog/exception checks.
+        let should_float = match rule_override {
+            Some(force_float) => force_float,
+            None => is_dialog || floating_exception,
+        };
+        if should_float || !workspace.tiling_enabled {
             workspace.floating_layer.map(mapped.clone(), None);
+            // In monocle mode, maximize new non-dialog windows.
+            if workspace.is_monocle() && !should_float {
+                let output_geo = workspace.output.geometry();
+                mapped.set_maximized(true);
+                mapped.set_geometry(output_geo);
+            }
         } else {
             for mapped in workspace
                 .mapped()
@@ -3827,6 +3858,15 @@ impl Shell {
             return None;
         }
 
+        // In monocle mode, windows are fixed (maximized, no dragging).
+        let output = seat.active_output();
+        if self
+            .active_space(&output)
+            .is_some_and(|ws| ws.is_monocle())
+        {
+            return None;
+        }
+
         let serial = serial.into();
         let mut element_geo = None;
 
@@ -4167,6 +4207,40 @@ impl Shell {
 
         if focused.handle_focus(seat, direction, None) {
             return FocusResult::Handled;
+        }
+
+        // Monocle: cycle through focus stack instead of spatial navigation.
+        if workspace.is_monocle() {
+            let focus_stack: Vec<_> = workspace
+                .focus_stack
+                .get(seat)
+                .iter()
+                .filter_map(|t| match t {
+                    FocusTarget::Window(w) => Some(w.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            if focus_stack.len() <= 1 {
+                return FocusResult::None;
+            }
+
+            let current_idx = focus_stack.iter().position(|w| w == &focused);
+            let next_idx = match direction {
+                FocusDirection::Down | FocusDirection::Right => {
+                    current_idx.map(|i| (i + 1) % focus_stack.len()).unwrap_or(0)
+                }
+                FocusDirection::Up | FocusDirection::Left => {
+                    current_idx
+                        .map(|i| if i == 0 { focus_stack.len() - 1 } else { i - 1 })
+                        .unwrap_or(0)
+                }
+                _ => return FocusResult::None,
+            };
+
+            return FocusResult::Some(KeyboardFocusTarget::Element(
+                focus_stack[next_idx].clone(),
+            ));
         }
 
         if workspace.is_tiled(&focused.active_window()) {
@@ -5129,6 +5203,174 @@ impl Shell {
                         .chain(w.minimized_windows.iter().flat_map(|m| m.mapped()))
                 }))
         })
+    }
+
+    // ── Scratchpad ───────────────────────────────────────────────────────
+
+    /// Move the focused window to the scratchpad.
+    ///
+    /// Removes the window from its current layer (tiling or floating),
+    /// hides it, and adds it to the scratchpad list.
+    pub fn scratchpad_move(&mut self, seat: &Seat<State>) {
+        let output = seat.focused_or_active_output();
+        let Some(workspace) = self.active_space_mut(&output) else {
+            return;
+        };
+
+        // Get the focused mapped element.
+        let maybe_window = workspace.focus_stack.get(seat).iter().next().cloned();
+        let Some(FocusTarget::Window(mapped)) = maybe_window else {
+            return;
+        };
+
+        // Remove from workspace (handles both tiling and floating).
+        workspace.unmap_element(&mapped);
+
+        // Hide all surfaces of the mapped element.
+        for (surface, _) in mapped.windows() {
+            if let Some(wl) = surface.wl_surface() {
+                // Setting geometry to zero effectively hides the window.
+                // The window is kept alive in the scratchpad list.
+            }
+        }
+
+        tracing::info!(
+            "scratchpad: moved {} to scratchpad (now {} windows)",
+            mapped.active_window().app_id(),
+            self.scratchpad.windows.len() + 1,
+        );
+
+        self.scratchpad.windows.push(mapped);
+    }
+
+    /// Toggle scratchpad visibility.
+    ///
+    /// - If no scratchpad window is visible and scratchpad is not empty:
+    ///   show the first window (floating, centered, 80% output size).
+    /// - If a scratchpad window is visible and focused: hide it.
+    /// - If a scratchpad window is visible but not focused: focus it.
+    /// - If pressed again while focused: cycle to next scratchpad window.
+    pub fn scratchpad_toggle(&mut self, seat: &Seat<State>) {
+        if self.scratchpad.windows.is_empty() {
+            return;
+        }
+
+        let output = seat.focused_or_active_output();
+
+        if let Some(visible_idx) = self.scratchpad.visible {
+            // A scratchpad window is currently shown.
+            let mapped = &self.scratchpad.windows[visible_idx];
+
+            // Check if the scratchpad window is currently focused.
+            let Some(workspace) = self.active_space(&output) else {
+                return;
+            };
+            let is_focused = workspace
+                .focus_stack
+                .get(seat)
+                .iter()
+                .next()
+                .is_some_and(|f| matches!(f, FocusTarget::Window(w) if w == mapped));
+
+            if is_focused {
+                // Already focused: cycle to next or hide.
+                let next_idx = (visible_idx + 1) % self.scratchpad.windows.len();
+                if next_idx == visible_idx {
+                    // Only one window: hide it.
+                    self.scratchpad_hide(seat);
+                } else {
+                    // Hide current, show next.
+                    self.scratchpad_hide(seat);
+                    self.scratchpad_show(next_idx, seat);
+                }
+            } else {
+                // Visible but not focused: just focus it.
+                // The window is already in the floating layer.
+            }
+        } else {
+            // No scratchpad window visible: show the first one.
+            self.scratchpad_show(0, seat);
+        }
+    }
+
+    /// Show a scratchpad window by index.
+    ///
+    /// Maps it to the active workspace's floating layer, centered at 80%
+    /// of the output size.
+    fn scratchpad_show(&mut self, idx: usize, seat: &Seat<State>) {
+        if idx >= self.scratchpad.windows.len() {
+            return;
+        }
+
+        let output = seat.focused_or_active_output();
+        let output_geo = output.geometry();
+
+        // 80% of output size.
+        let width = (output_geo.size.w as f64 * 0.8) as i32;
+        let height = (output_geo.size.h as f64 * 0.8) as i32;
+        let x = output_geo.loc.x + (output_geo.size.w - width) / 2;
+        let y = output_geo.loc.y + (output_geo.size.h - height) / 2;
+
+        let mapped = self.scratchpad.windows[idx].clone();
+
+        // Configure the window size.
+        mapped.set_geometry(smithay::utils::Rectangle::from_loc_and_size(
+            (0, 0),
+            (width, height),
+        ));
+
+        let Some(workspace) = self.active_space_mut(&output) else {
+            return;
+        };
+
+        // Map to floating layer at centered position.
+        let local_pos = Point::<i32, Logical>::from((
+            x - output_geo.loc.x,
+            y - output_geo.loc.y,
+        )).as_local();
+        workspace.floating_layer.map(mapped, Some(local_pos));
+
+        self.scratchpad.visible = Some(idx);
+
+        tracing::info!("scratchpad: showing window {idx}");
+    }
+
+    /// Hide the currently visible scratchpad window.
+    fn scratchpad_hide(&mut self, seat: &Seat<State>) {
+        let Some(visible_idx) = self.scratchpad.visible.take() else {
+            return;
+        };
+
+        if visible_idx >= self.scratchpad.windows.len() {
+            return;
+        }
+
+        let mapped = self.scratchpad.windows[visible_idx].clone();
+        let output = seat.focused_or_active_output();
+
+        if let Some(workspace) = self.active_space_mut(&output) {
+            workspace.unmap_element(&mapped);
+        }
+
+        tracing::info!("scratchpad: hiding window {visible_idx}");
+    }
+
+    /// Remove a window from the scratchpad if it was closed.
+    ///
+    /// Called during surface cleanup to handle the edge case where
+    /// a scratchpad window is destroyed.
+    pub fn scratchpad_remove_dead(&mut self) {
+        let before = self.scratchpad.windows.len();
+        self.scratchpad.windows.retain(|w| w.alive());
+
+        if self.scratchpad.windows.len() != before {
+            // Adjust visible index.
+            if let Some(idx) = self.scratchpad.visible {
+                if idx >= self.scratchpad.windows.len() {
+                    self.scratchpad.visible = None;
+                }
+            }
+        }
     }
 }
 

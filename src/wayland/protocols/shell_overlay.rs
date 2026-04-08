@@ -350,6 +350,19 @@ impl ShellOverlayState {
         }
     }
 
+    /// Notify connected shells of a layout mode change.
+    pub fn send_layout_mode_changed(&self, mode: u32) {
+        let layout_mode = match mode {
+            0 => lunaris_shell_overlay_v1::LayoutModeType::Floating,
+            1 => lunaris_shell_overlay_v1::LayoutModeType::Tiling,
+            2 => lunaris_shell_overlay_v1::LayoutModeType::Monocle,
+            _ => lunaris_shell_overlay_v1::LayoutModeType::Floating,
+        };
+        for instance in &self.instances {
+            instance.layout_mode_changed(layout_mode);
+        }
+    }
+
     /// Notify connected shells to open the Waypointer launcher.
     pub fn send_waypointer_open(&self) {
         for instance in &self.instances {
@@ -482,6 +495,9 @@ pub trait ShellOverlayHandler {
 
     /// Called when the shell sends a window header action.
     fn window_header_action(&mut self, surface_id: u32, action: u32);
+
+    /// Called when the shell requests a layout mode change.
+    fn set_layout_mode(&mut self, mode: u32);
 }
 
 // ===== GlobalDispatch =====
@@ -561,6 +577,13 @@ where
                     smithay::reexports::wayland_server::WEnum::Unknown(v) => v,
                 };
                 state.window_header_action(surface_id, action_u32);
+            }
+            OverlayRequest::SetLayoutMode { mode } => {
+                let mode_u32 = match mode {
+                    smithay::reexports::wayland_server::WEnum::Value(v) => v as u32,
+                    smithay::reexports::wayland_server::WEnum::Unknown(v) => v,
+                };
+                state.set_layout_mode(mode_u32);
             }
         }
     }

@@ -181,6 +181,74 @@ impl ShellOverlayHandler for State {
         std::mem::drop(shell);
     }
 
+    fn set_layout_mode(&mut self, mode: u32) {
+        use crate::shell::LayoutMode;
+
+        let shell = self.common.shell.read();
+        let seat = shell.seats.last_active().clone();
+        let output = seat.active_output();
+        drop(shell);
+
+        let target_mode = match mode {
+            0 => LayoutMode::Floating,
+            1 => LayoutMode::Tiling,
+            2 => LayoutMode::Monocle,
+            _ => {
+                tracing::warn!("shell_overlay: unknown layout mode {mode}");
+                return;
+            }
+        };
+
+        let mut shell = self.common.shell.write();
+        let mut guard = self.common.workspace_state.update();
+
+        let Some(workspace) = shell.workspaces.active_mut(&output) else {
+            return;
+        };
+
+        let current = workspace.layout_mode;
+        if current == target_mode {
+            return;
+        }
+
+        tracing::info!("set_layout_mode: {:?} -> {:?}", current, target_mode);
+
+        match target_mode {
+            LayoutMode::Monocle => {
+                if current == LayoutMode::Monocle {
+                    return;
+                }
+                workspace.enter_monocle(&seat, &mut guard);
+            }
+            LayoutMode::Tiling => {
+                if current == LayoutMode::Monocle {
+                    workspace.exit_monocle(&seat, &mut guard);
+                }
+                if !workspace.tiling_enabled {
+                    workspace.set_tiling(true, &seat, &mut guard);
+                }
+                workspace.layout_mode = LayoutMode::Tiling;
+            }
+            LayoutMode::Floating => {
+                if current == LayoutMode::Monocle {
+                    workspace.exit_monocle(&seat, &mut guard);
+                }
+                if workspace.tiling_enabled {
+                    workspace.set_tiling(false, &seat, &mut guard);
+                }
+                workspace.layout_mode = LayoutMode::Floating;
+            }
+        }
+
+        drop(shell);
+        drop(guard);
+
+        // Notify the shell of the change.
+        self.common
+            .shell_overlay_state
+            .send_layout_mode_changed(target_mode as u32);
+    }
+
     fn tab_activate(&mut self, stack_id: u32, index: u32) {
         let found = {
             let shell = self.common.shell.read();

@@ -2009,7 +2009,54 @@ impl State {
             return FilterResult::Intercept(None);
         }
 
-        // handle the rest of the global shortcuts
+        // Check TOML keybindings first (highest priority).
+        if !shortcuts_inhibited && event.state() == KeyState::Pressed {
+            if !self.common.config.toml_keybindings.is_empty() {
+                tracing::debug!(
+                    "toml_keybindings: checking {} bindings (mods: logo={} shift={} ctrl={} alt={}, raw_syms={:?}, latin={:?})",
+                    self.common.config.toml_keybindings.len(),
+                    modifiers.logo, modifiers.shift, modifiers.ctrl, modifiers.alt,
+                    raw_syms, latin_sym,
+                );
+            }
+            for kb in &self.common.config.toml_keybindings {
+                let mods_match = kb.modifiers.super_key == modifiers.logo
+                    && kb.modifiers.shift == modifiers.shift
+                    && kb.modifiers.ctrl == modifiers.ctrl
+                    && kb.modifiers.alt == modifiers.alt;
+                if !mods_match {
+                    continue;
+                }
+                let Some(keysym) = crate::config::keysym_from_str(&kb.key) else {
+                    tracing::warn!("toml_keybindings: could not resolve key {:?}", kb.key);
+                    continue;
+                };
+                if !key_matches(keysym) {
+                    tracing::debug!(
+                        "toml_keybindings: mods match for {:?} but key {:?} (keysym={:?}) not in raw_syms={:?}",
+                        kb.action, kb.key, keysym, raw_syms,
+                    );
+                    continue;
+                }
+                tracing::info!("toml_keybindings: MATCHED {:?} -> {:?}", kb.key, kb.action);
+                let Some(action) = crate::config::action_from_str(&kb.action) else {
+                    tracing::warn!("unknown keybinding action: {:?}", kb.action);
+                    continue;
+                };
+                seat.modifiers_shortcut_queue().clear();
+                seat.supressed_keys().add(&handle, None);
+                // Construct a dummy binding for handle_action compatibility.
+                let binding = shortcuts::Binding {
+                    modifiers: cosmic_modifiers_from_smithay(*modifiers),
+                    key: Some(keysym),
+                    keycode: None,
+                    description: None,
+                };
+                return FilterResult::Intercept(Some((action, binding)));
+            }
+        }
+
+        // handle the rest of the global shortcuts (cosmic-config)
         let mut clear_queue = true;
         if !shortcuts_inhibited {
             let modifiers_queue = seat.modifiers_shortcut_queue();

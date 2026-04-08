@@ -97,6 +97,31 @@ impl State {
                         .finish_resize(direction, edge.into());
                 }
             }
+
+            Action::Private(PrivateAction::ScratchpadToggle) => {
+                let mut shell = self.common.shell.write();
+                shell.scratchpad_toggle(seat);
+            }
+            Action::Private(PrivateAction::ScratchpadMove) => {
+                let mut shell = self.common.shell.write();
+                shell.scratchpad_move(seat);
+            }
+            Action::Private(PrivateAction::ToggleMonocle) => {
+                let output = seat.active_output();
+                let new_mode = {
+                    let mut shell = self.common.shell.write();
+                    let mut guard = self.common.workspace_state.update();
+                    if let Some(workspace) = shell.workspaces.active_mut(&output) {
+                        workspace.toggle_monocle(seat, &mut guard);
+                        workspace.layout_mode
+                    } else {
+                        crate::shell::LayoutMode::Floating
+                    }
+                };
+                self.common
+                    .shell_overlay_state
+                    .send_layout_mode_changed(new_mode as u32);
+            }
         }
     }
 
@@ -969,12 +994,33 @@ impl State {
                             error!(?err, "Failed to update autotile key");
                         }
                     });
+                    // Notify shell of mode change.
+                    let mode = if autotile {
+                        crate::shell::LayoutMode::Tiling
+                    } else {
+                        crate::shell::LayoutMode::Floating
+                    };
+                    self.common
+                        .shell_overlay_state
+                        .send_layout_mode_changed(mode as u32);
                 } else {
                     let output = seat.active_output();
-                    let mut shell = self.common.shell.write();
-                    let workspace = shell.workspaces.active_mut(&output).unwrap();
-                    let mut guard = self.common.workspace_state.update();
-                    workspace.toggle_tiling(seat, &mut guard);
+                    let new_mode = {
+                        let mut shell = self.common.shell.write();
+                        let workspace = shell.workspaces.active_mut(&output).unwrap();
+                        let mut guard = self.common.workspace_state.update();
+                        workspace.toggle_tiling(seat, &mut guard);
+                        // Update layout_mode to match tiling_enabled.
+                        workspace.layout_mode = if workspace.tiling_enabled {
+                            crate::shell::LayoutMode::Tiling
+                        } else {
+                            crate::shell::LayoutMode::Floating
+                        };
+                        workspace.layout_mode
+                    };
+                    self.common
+                        .shell_overlay_state
+                        .send_layout_mode_changed(new_mode as u32);
                 }
             }
 

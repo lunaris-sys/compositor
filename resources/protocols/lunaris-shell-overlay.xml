@@ -303,6 +303,30 @@
       <arg name="action" type="uint" enum="window_header_action_type" summary="which button was pressed"/>
     </request>
 
+    <!-- ===== Layout Mode ===== -->
+
+    <enum name="layout_mode_type">
+      <entry name="floating" value="0" summary="normal floating windows"/>
+      <entry name="tiling" value="1" summary="BSP tiling"/>
+      <entry name="monocle" value="2" summary="monocle (maximized, stacked)"/>
+    </enum>
+
+    <request name="set_layout_mode">
+      <description summary="set the layout mode for the active workspace">
+        Sent by the shell to change the layout mode of the currently
+        active workspace on the given output.
+      </description>
+      <arg name="mode" type="uint" enum="layout_mode_type" summary="desired layout mode"/>
+    </request>
+
+    <event name="layout_mode_changed">
+      <description summary="layout mode changed on a workspace">
+        Sent when the layout mode changes (via keybinding, shell request,
+        or workspace switch).
+      </description>
+      <arg name="mode" type="uint" enum="layout_mode_type" summary="new layout mode"/>
+    </event>
+
     <!-- ===== Fullscreen Titlebar Reveal ===== -->
 
     <event name="fullscreen_titlebar_reveal">

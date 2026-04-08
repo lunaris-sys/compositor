@@ -781,8 +781,11 @@ where
         .find(|w| w.handle == current.0)
         .ok_or(OutputNoMode)?;
     let is_active_space = workspace.output == focused_output;
-    let active_hint = if shell.active_hint {
-        shell.lunaris_theme.active_hint as u8
+    // Active hint border: only show in tiling mode.
+    let active_hint = if workspace.layout_mode == crate::shell::LayoutMode::Tiling {
+        let theme_val = shell.lunaris_theme.active_hint as u8;
+        // Default to 3px if the theme doesn't set a value.
+        if theme_val > 0 { theme_val } else { 3 }
     } else {
         0
     };

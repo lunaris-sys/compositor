@@ -134,6 +134,12 @@ pub struct TilingLayout {
     swapping_stack_surface_id: Id,
     last_overview_hover: Option<(Option<Instant>, TargetZone)>,
     pub appearance: AppearanceConfig,
+    /// Inner gap between tiled windows (pixels). From config.
+    pub inner_gap: i32,
+    /// Outer gap at screen edges (pixels). From config.
+    pub outer_gap: i32,
+    /// When true, no gaps when only one window is tiled.
+    pub smart_gaps: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -363,7 +369,17 @@ impl TilingLayout {
             swapping_stack_surface_id: Id::new(),
             last_overview_hover: None,
             appearance,
+            inner_gap: 8,
+            outer_gap: 8,
+            smart_gaps: true,
         }
+    }
+
+    /// Update gap configuration from the compositor config.
+    pub fn set_gaps(&mut self, inner: i32, outer: i32, smart: bool) {
+        self.inner_gap = inner;
+        self.outer_gap = outer;
+        self.smart_gaps = smart;
     }
 
     pub fn set_output(&mut self, output: &Output) {
@@ -4260,8 +4276,22 @@ impl TilingLayout {
     }
 
     fn gaps(&self) -> (i32, i32) {
-        let g = crate::theme::lunaris_theme().gaps;
-        (g.0 as i32, g.1 as i32)
+        if self.smart_gaps && self.mapped_window_count() <= 1 {
+            return (0, 0);
+        }
+        (self.outer_gap, self.inner_gap)
+    }
+
+    /// Count the number of mapped (non-placeholder) windows in the current tree.
+    fn mapped_window_count(&self) -> usize {
+        let Some((tree, _, _)) = self.queue.trees.back() else { return 0 };
+        let Some(root) = tree.root_node_id() else { return 0 };
+        match tree.traverse_pre_order(root) {
+            Ok(iter) => iter
+                .filter(|node| matches!(node.data(), Data::Mapped { .. }))
+                .count(),
+            Err(_) => 0,
+        }
     }
 }
 

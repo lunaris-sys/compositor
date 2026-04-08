@@ -51,7 +51,7 @@ use cosmic_comp_config::{
         OutputConfig, OutputInfo, OutputState, OutputsConfig, TransformDef, load_outputs,
     },
 };
-pub use key_bindings::{Action, PrivateAction};
+pub use key_bindings::{Action, PrivateAction, action_from_str, keysym_from_str};
 use types::WlXkbConfig;
 
 #[derive(Debug)]
@@ -70,6 +70,10 @@ pub struct Config {
     pub shortcuts: Shortcuts,
     // Tiling exceptions from `com.system76.CosmicSettings.WindowRules`
     pub tiling_exceptions: Vec<ApplicationException>,
+    /// Layout and tiling configuration from TOML.
+    pub layout: LayoutConfig,
+    /// Keybindings from TOML `[keybindings]` section.
+    pub toml_keybindings: Vec<KeyBinding>,
     /// System actions from `com.system76.CosmicSettings.Shortcuts`
     pub system_actions: BTreeMap<shortcuts::action::System, String>,
     /// True when running nested inside another Wayland compositor (Winit/X11 backend).
@@ -173,6 +177,118 @@ pub enum ColorFilter {
     Tritanopia = 4,
 }
 
+// ── Layout configuration ─────────────────────────────────────────────────────
+
+/// Layout and tiling configuration loaded from `[layout]` in compositor.toml.
+#[derive(Debug, Clone)]
+pub struct LayoutConfig {
+    /// Inner gap between tiled windows (pixels).
+    pub inner_gap: i32,
+    /// Outer gap between tiled windows and screen edges (pixels).
+    pub outer_gap: i32,
+    /// When true, no gaps are applied when a workspace has only one tiled window.
+    pub smart_gaps: bool,
+    /// Window rules for float/tile decisions.
+    pub window_rules: Vec<WindowRule>,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            inner_gap: 8,
+            outer_gap: 8,
+            smart_gaps: true,
+            window_rules: Vec::new(),
+        }
+    }
+}
+
+/// A rule that determines whether a window should float or tile.
+#[derive(Debug, Clone)]
+pub struct WindowRule {
+    pub matcher: WindowMatch,
+    pub action: WindowAction,
+}
+
+/// Matching criteria for a window rule.
+#[derive(Debug, Clone)]
+pub struct WindowMatch {
+    /// Regex pattern for the app_id. None = match any.
+    pub app_id: Option<regex::Regex>,
+    /// Regex pattern for the window title. None = match any.
+    pub title: Option<regex::Regex>,
+    /// Match on window type (e.g. "dialog").
+    pub window_type: Option<String>,
+}
+
+/// What to do with a matched window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAction {
+    Float,
+    Tile,
+}
+
+impl WindowMatch {
+    /// Check whether a window matches this rule.
+    pub fn matches(&self, app_id: &str, title: &str, is_dialog: bool) -> bool {
+        if let Some(ref wt) = self.window_type {
+            if wt == "dialog" && !is_dialog {
+                return false;
+            }
+        }
+        if let Some(ref re) = self.app_id {
+            if !re.is_match(app_id) {
+                return false;
+            }
+        }
+        if let Some(ref re) = self.title {
+            if !re.is_match(title) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+// ── Keybinding configuration ─────────────────────────────────────────────────
+
+/// A parsed keybinding: modifier set + key -> action string.
+#[derive(Debug, Clone)]
+pub struct KeyBinding {
+    pub modifiers: KeyBindingModifiers,
+    pub key: String,
+    pub action: String,
+}
+
+/// Modifier flags for a keybinding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyBindingModifiers {
+    pub super_key: bool,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+/// Parse a keybinding string like "Super+Shift+H" into modifiers + key.
+fn parse_keybinding(binding: &str) -> Option<(KeyBindingModifiers, String)> {
+    let mut mods = KeyBindingModifiers::default();
+    let parts: Vec<&str> = binding.split('+').collect();
+    if parts.is_empty() {
+        return None;
+    }
+    for part in &parts[..parts.len() - 1] {
+        match part.to_lowercase().as_str() {
+            "super" | "logo" | "mod4" => mods.super_key = true,
+            "shift" => mods.shift = true,
+            "ctrl" | "control" => mods.ctrl = true,
+            "alt" | "mod1" => mods.alt = true,
+            _ => {}
+        }
+    }
+    let key = parts.last()?.to_string();
+    Some((mods, key))
+}
+
 /// Default TOML config path.
 const DEFAULT_TOML_PATH: &str = ".config/lunaris/compositor.toml";
 
@@ -181,7 +297,20 @@ const DEFAULT_TOML_PATH: &str = ".config/lunaris/compositor.toml";
 /// The user TOML is typically a sparse file with only the fields the
 /// user wants to override. We start from defaults and apply overrides
 /// for the sections we recognize.
-fn load_toml_config(path: &std::path::Path) -> CosmicCompConfig {
+/// Parsed result from the TOML compositor config.
+struct TomlConfig {
+    cosmic: CosmicCompConfig,
+    layout: LayoutConfig,
+    keybindings: Vec<KeyBinding>,
+}
+
+fn load_toml_config(path: &std::path::Path) -> TomlConfig {
+    let default = || TomlConfig {
+        cosmic: CosmicCompConfig::default(),
+        layout: LayoutConfig::default(),
+        keybindings: Vec::new(),
+    };
+
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => {
@@ -189,7 +318,7 @@ fn load_toml_config(path: &std::path::Path) -> CosmicCompConfig {
                 "no compositor.toml at {}, using defaults",
                 path.display()
             );
-            return CosmicCompConfig::default();
+            return default();
         }
     };
 
@@ -197,7 +326,7 @@ fn load_toml_config(path: &std::path::Path) -> CosmicCompConfig {
         Ok(t) => t,
         Err(err) => {
             warn!(?err, "failed to parse compositor.toml");
-            return CosmicCompConfig::default();
+            return default();
         }
     };
 
@@ -243,12 +372,147 @@ fn load_toml_config(path: &std::path::Path) -> CosmicCompConfig {
         config.xkb_config.layout,
     );
 
-    // Verify XKB layout was actually loaded.
     if config.xkb_config.layout.is_empty() {
         tracing::warn!("XKB layout is EMPTY after loading TOML from {}", path.display());
     }
 
-    config
+    let layout = parse_layout_config(&table);
+    let keybindings = parse_keybindings_config(&table);
+
+    TomlConfig {
+        cosmic: config,
+        layout,
+        keybindings,
+    }
+}
+
+/// Parse layout configuration from the TOML table.
+fn parse_layout_config(table: &toml::Table) -> LayoutConfig {
+    let mut layout = LayoutConfig::default();
+
+    let Some(section) = table.get("layout").and_then(|v| v.as_table()) else {
+        return layout;
+    };
+
+    if let Some(n) = section.get("inner_gap").and_then(|v| v.as_integer()) {
+        layout.inner_gap = n as i32;
+    }
+    if let Some(n) = section.get("outer_gap").and_then(|v| v.as_integer()) {
+        layout.outer_gap = n as i32;
+    }
+    if let Some(b) = section.get("smart_gaps").and_then(|v| v.as_bool()) {
+        layout.smart_gaps = b;
+    }
+
+    // Parse [[layout.window_rules]] array.
+    if let Some(rules) = section.get("window_rules").and_then(|v| v.as_array()) {
+        for rule_val in rules {
+            let Some(rule_table) = rule_val.as_table() else { continue };
+            let action = match rule_table.get("action").and_then(|v| v.as_str()) {
+                Some("float") => WindowAction::Float,
+                Some("tile") => WindowAction::Tile,
+                _ => continue,
+            };
+            let matcher = if let Some(m) = rule_table.get("match").and_then(|v| v.as_table()) {
+                WindowMatch {
+                    app_id: m
+                        .get("app_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| regex::Regex::new(s).ok()),
+                    title: m
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| regex::Regex::new(s).ok()),
+                    window_type: m
+                        .get("window_type")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                }
+            } else {
+                continue;
+            };
+            layout.window_rules.push(WindowRule { matcher, action });
+        }
+    }
+
+    tracing::info!(
+        "layout config: inner_gap={} outer_gap={} smart_gaps={} rules={}",
+        layout.inner_gap,
+        layout.outer_gap,
+        layout.smart_gaps,
+        layout.window_rules.len(),
+    );
+
+    layout
+}
+
+/// Default keybindings used when no `[keybindings]` section is present.
+fn default_keybindings() -> Vec<KeyBinding> {
+    let mut bindings = Vec::new();
+    let defaults = [
+        ("Super+T", "toggle_tiling"),
+        ("Super+Shift+Space", "toggle_window_floating"),
+        ("Super+H", "focus_left"),
+        ("Super+J", "focus_down"),
+        ("Super+K", "focus_up"),
+        ("Super+L", "focus_right"),
+        ("Super+Shift+H", "move_left"),
+        ("Super+Shift+J", "move_down"),
+        ("Super+Shift+K", "move_up"),
+        ("Super+Shift+L", "move_right"),
+        ("Super+F", "fullscreen"),
+        ("Super+Q", "close_window"),
+        ("Super+M", "toggle_monocle"),
+        ("Super+Minus", "scratchpad_toggle"),
+        ("Super+Shift+Minus", "scratchpad_move"),
+    ];
+    for (key_str, action) in defaults {
+        if let Some((modifiers, key)) = parse_keybinding(key_str) {
+            bindings.push(KeyBinding {
+                modifiers,
+                key,
+                action: action.to_string(),
+            });
+        }
+    }
+    bindings
+}
+
+/// Parse keybindings from the TOML `[keybindings]` table.
+///
+/// If no `[keybindings]` section exists, default keybindings are used.
+/// If the section exists (even if empty), only the configured bindings
+/// are active (explicit override).
+fn parse_keybindings_config(table: &toml::Table) -> Vec<KeyBinding> {
+    let Some(section) = table.get("keybindings").and_then(|v| v.as_table()) else {
+        return default_keybindings();
+    };
+
+    let mut bindings = Vec::new();
+    for (key_str, action_val) in section {
+        let Some(action) = action_val.as_str() else { continue };
+        if let Some((modifiers, key)) = parse_keybinding(key_str) {
+            bindings.push(KeyBinding {
+                modifiers,
+                key,
+                action: action.to_string(),
+            });
+        }
+    }
+
+    if !bindings.is_empty() {
+        tracing::info!("loaded {} keybindings from TOML", bindings.len());
+        for kb in &bindings {
+            tracing::info!(
+                "  keybinding: {:?}+{:?} -> {:?}",
+                kb.modifiers, kb.key, kb.action,
+            );
+        }
+    } else {
+        tracing::info!("no keybindings found in TOML [keybindings] section");
+    }
+
+    bindings
 }
 
 impl Config {
@@ -263,7 +527,10 @@ impl Config {
                 PathBuf::from(home).join(DEFAULT_TOML_PATH)
             });
 
-        let cosmic_comp_config = load_toml_config(&toml_path);
+        let toml_config = load_toml_config(&toml_path);
+        let cosmic_comp_config = toml_config.cosmic;
+        let layout_config = toml_config.layout;
+        let toml_keybindings = toml_config.keybindings;
 
         // Watch the TOML config file for changes via notify.
         if let Some(parent) = toml_path.parent() {
@@ -398,8 +665,10 @@ impl Config {
             cosmic_helper,
             settings_context,
             shortcuts,
-            system_actions,
             tiling_exceptions,
+            layout: layout_config,
+            toml_keybindings,
+            system_actions,
             nested: false,
         }
     }
@@ -980,7 +1249,29 @@ pub fn change_modifier_state(
 /// Called when the TOML config file changes. Reloads the full config and
 /// applies side effects for any fields that differ from the current state.
 fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
-    let new = load_toml_config(toml_path);
+    let toml = load_toml_config(toml_path);
+    let new = toml.cosmic;
+
+    // Update layout config and keybindings.
+    state.common.config.layout = toml.layout;
+    state.common.config.toml_keybindings = toml.keybindings;
+
+    // Propagate gap settings and window rules to the shell.
+    {
+        let layout = &state.common.config.layout;
+        let mut shell = state.common.shell.write();
+        for workspace in shell.workspaces.spaces_mut() {
+            workspace.tiling_layer.set_gaps(
+                layout.inner_gap,
+                layout.outer_gap,
+                layout.smart_gaps,
+            );
+            // Re-layout immediately so gap changes are visible without
+            // waiting for the next window event.
+            workspace.tiling_layer.recalculate();
+        }
+        shell.window_rules = layout.window_rules.clone();
+    }
 
     // Compare old vs new to determine which side effects to trigger.
     // We clone the old config so we can assign the new one early and avoid
@@ -1135,13 +1426,18 @@ workspace_layout = "Horizontal"
         )
         .unwrap();
 
-        let config = load_toml_config(&path);
-        assert_eq!(
-            config.xkb_config.layout, "de",
-            "layout must be 'de' from TOML"
+        let tc = load_toml_config(&path);
+        assert_eq!(tc.cosmic.xkb_config.layout, "de", "layout must be 'de'");
+        assert_eq!(tc.cosmic.xkb_config.repeat_rate, 25);
+        // No [keybindings] section -> defaults are loaded.
+        assert!(
+            !tc.keybindings.is_empty(),
+            "default keybindings should be loaded when no [keybindings] section"
         );
-        // Other fields should be defaults.
-        assert_eq!(config.xkb_config.repeat_rate, 25);
+        assert!(
+            tc.keybindings.iter().any(|k| k.action == "focus_left"),
+            "default keybindings should include focus_left"
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
@@ -1154,9 +1450,8 @@ workspace_layout = "Horizontal"
         let path = dir.join("test-empty.toml");
         std::fs::write(&path, "").unwrap();
 
-        let config = load_toml_config(&path);
-        // Should get defaults, no panic.
-        assert_eq!(config.xkb_config.layout, "");
+        let tc = load_toml_config(&path);
+        assert_eq!(tc.cosmic.xkb_config.layout, "");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
@@ -1164,7 +1459,106 @@ workspace_layout = "Horizontal"
 
     #[test]
     fn test_load_missing_toml() {
-        let config = load_toml_config(std::path::Path::new("/nonexistent/path.toml"));
-        assert_eq!(config.xkb_config.layout, "");
+        let tc = load_toml_config(std::path::Path::new("/nonexistent/path.toml"));
+        assert_eq!(tc.cosmic.xkb_config.layout, "");
+    }
+
+    #[test]
+    fn test_load_layout_config() {
+        let dir = std::env::temp_dir().join("lunaris-config-test-layout");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-layout.toml");
+        std::fs::write(
+            &path,
+            r#"
+[layout]
+inner_gap = 4
+outer_gap = 12
+smart_gaps = false
+
+[[layout.window_rules]]
+match = { app_id = "pavucontrol" }
+action = "float"
+
+[[layout.window_rules]]
+match = { app_id = "firefox", title = ".*Picture-in-Picture.*" }
+action = "float"
+"#,
+        )
+        .unwrap();
+
+        let tc = load_toml_config(&path);
+        assert_eq!(tc.layout.inner_gap, 4);
+        assert_eq!(tc.layout.outer_gap, 12);
+        assert!(!tc.layout.smart_gaps);
+        assert_eq!(tc.layout.window_rules.len(), 2);
+        assert_eq!(tc.layout.window_rules[0].action, WindowAction::Float);
+        assert!(tc.layout.window_rules[0].matcher.app_id.as_ref().unwrap().is_match("pavucontrol"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_load_keybindings() {
+        let dir = std::env::temp_dir().join("lunaris-config-test-kb");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-keybindings.toml");
+        std::fs::write(
+            &path,
+            r#"
+[keybindings]
+"Super+T" = "toggle_tiling"
+"Super+Shift+H" = "move_left"
+"Super+Ctrl+L" = "resize_grow_width"
+"#,
+        )
+        .unwrap();
+
+        let tc = load_toml_config(&path);
+        assert_eq!(tc.keybindings.len(), 3);
+
+        let toggle = tc.keybindings.iter().find(|k| k.action == "toggle_tiling").unwrap();
+        assert!(toggle.modifiers.super_key);
+        assert!(!toggle.modifiers.shift);
+        assert_eq!(toggle.key, "T");
+
+        let move_left = tc.keybindings.iter().find(|k| k.action == "move_left").unwrap();
+        assert!(move_left.modifiers.super_key);
+        assert!(move_left.modifiers.shift);
+        assert_eq!(move_left.key, "H");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_window_match() {
+        let match_all = WindowMatch { app_id: None, title: None, window_type: None };
+        assert!(match_all.matches("any", "any", false));
+
+        let match_app = WindowMatch {
+            app_id: Some(regex::Regex::new("pavucontrol").unwrap()),
+            title: None,
+            window_type: None,
+        };
+        assert!(match_app.matches("pavucontrol", "Volume Control", false));
+        assert!(!match_app.matches("firefox", "Mozilla", false));
+
+        let match_both = WindowMatch {
+            app_id: Some(regex::Regex::new("firefox").unwrap()),
+            title: Some(regex::Regex::new(".*PiP.*").unwrap()),
+            window_type: None,
+        };
+        assert!(match_both.matches("firefox", "PiP Window", false));
+        assert!(!match_both.matches("firefox", "Normal Page", false));
+
+        let match_dialog = WindowMatch {
+            app_id: None,
+            title: None,
+            window_type: Some("dialog".into()),
+        };
+        assert!(match_dialog.matches("any", "any", true));
+        assert!(!match_dialog.matches("any", "any", false));
     }
 }

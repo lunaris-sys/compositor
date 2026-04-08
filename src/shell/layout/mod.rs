@@ -90,7 +90,7 @@ impl TilingExceptions {
 }
 
 pub fn has_floating_exception(exceptions: &TilingExceptions, window: &CosmicSurface) -> bool {
-    // else take a look at our exceptions
+    // Check cosmic-config exceptions (legacy).
     let appid_matches = exceptions.app_ids.matches(&window.app_id());
     let title_matches = exceptions.titles.matches(&window.title());
     for idx in appid_matches.into_iter() {
@@ -100,4 +100,24 @@ pub fn has_floating_exception(exceptions: &TilingExceptions, window: &CosmicSurf
     }
 
     false
+}
+
+/// Check TOML window rules for float/tile action.
+///
+/// Returns `Some(true)` for force-float, `Some(false)` for force-tile,
+/// `None` if no rule matches (fall through to default behavior).
+pub fn check_window_rules(
+    rules: &[crate::config::WindowRule],
+    window: &CosmicSurface,
+) -> Option<bool> {
+    let app_id = window.app_id();
+    let title = window.title();
+    let dialog = is_dialog(window);
+
+    for rule in rules {
+        if rule.matcher.matches(&app_id, &title, dialog) {
+            return Some(rule.action == crate::config::WindowAction::Float);
+        }
+    }
+    None
 }

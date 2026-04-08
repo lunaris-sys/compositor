@@ -98,6 +98,25 @@ fn output_matches(output_match: &OutputMatch, output: &Output, disambiguate: boo
     }
 }
 
+/// Layout mode for a workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutMode {
+    /// Normal floating window management.
+    #[default]
+    Floating,
+    /// BSP tiling.
+    Tiling,
+    /// Monocle: all windows maximized, only focused visible.
+    Monocle,
+}
+
+/// State saved when entering monocle mode, for restoration.
+#[derive(Debug, Clone)]
+pub struct MonocleRestoreState {
+    /// The layout mode before entering monocle.
+    pub previous_mode: LayoutMode,
+}
+
 #[derive(Debug)]
 pub struct Workspace {
     pub output: Output,
@@ -106,6 +125,10 @@ pub struct Workspace {
     pub minimized_windows: Vec<MinimizedWindow>,
     pub tiling_enabled: bool,
     pub fullscreen: Option<FullscreenSurface>,
+    /// Current layout mode for this workspace.
+    pub layout_mode: LayoutMode,
+    /// Saved state from before monocle was entered.
+    pub monocle_restore: Option<MonocleRestoreState>,
     pub pinned: bool,
     pub id: Option<String>,
 
@@ -367,6 +390,11 @@ impl Workspace {
         let floating_layer = FloatingLayout::new(appearance, &output);
         let output_match = output_match_for_output(&output);
 
+        let layout_mode = if tiling_enabled {
+            LayoutMode::Tiling
+        } else {
+            LayoutMode::Floating
+        };
         Workspace {
             output,
             tiling_layer,
@@ -374,6 +402,8 @@ impl Workspace {
             tiling_enabled,
             minimized_windows: Vec::new(),
             fullscreen: None,
+            layout_mode,
+            monocle_restore: None,
             pinned: false,
             id: None,
             handle,
@@ -399,6 +429,11 @@ impl Workspace {
         let floating_layer = FloatingLayout::new(appearance, &output);
         let output_match = output_match_for_output(&output);
 
+        let layout_mode = if pinned.tiling_enabled {
+            LayoutMode::Tiling
+        } else {
+            LayoutMode::Floating
+        };
         Workspace {
             output,
             tiling_layer,
@@ -406,6 +441,8 @@ impl Workspace {
             tiling_enabled: pinned.tiling_enabled,
             minimized_windows: Vec::new(),
             fullscreen: None,
+            layout_mode,
+            monocle_restore: None,
             pinned: true,
             id: pinned.id.clone(),
             handle,
@@ -1402,6 +1439,119 @@ impl Workspace {
         if let Some(FocusTarget::Window(window)) = maybe_window {
             self.toggle_floating_window(seat, &window);
         }
+    }
+
+    // ── Monocle Mode ──────────────────────────────────────────────────────
+
+    /// Enter monocle mode: all windows maximized, only focused visible.
+    pub fn enter_monocle(
+        &mut self,
+        seat: &Seat<State>,
+        workspace_state: &mut crate::wayland::protocols::workspace::WorkspaceUpdateGuard<'_, State>,
+    ) {
+        if self.layout_mode == LayoutMode::Monocle {
+            return;
+        }
+
+        let previous_mode = self.layout_mode;
+        self.monocle_restore = Some(MonocleRestoreState { previous_mode });
+        self.layout_mode = LayoutMode::Monocle;
+
+        // If tiling was active, disable it first. This moves all tiled
+        // windows to the floating layer, preventing double-ownership
+        // between the tiling tree and floating space.
+        if self.tiling_enabled {
+            self.set_tiling(false, seat, workspace_state);
+        }
+
+        // Get the non-exclusive zone (full output minus top bar).
+        // IMPORTANT: Drop the layer_map MutexGuard before calling
+        // map_maximized, which also locks the layer_map internally.
+        let zone = {
+            let layers = smithay::desktop::layer_map_for_output(&self.output);
+            layers.non_exclusive_zone().as_local()
+        };
+
+        // Now all windows are in the floating layer. Collect them.
+        let windows: Vec<(CosmicMapped, Rectangle<i32, Local>)> = self
+            .floating_layer
+            .mapped()
+            .map(|m| {
+                let geo = self
+                    .floating_layer
+                    .space
+                    .element_geometry(m)
+                    .map(|g| g.as_local())
+                    .unwrap_or(zone);
+                (m.clone(), geo)
+            })
+            .collect();
+
+        // Maximize each window in the floating layer.
+        let window_count = windows.len();
+        for (mapped, prev_geo) in windows {
+            self.floating_layer.map_maximized(mapped, prev_geo, false);
+        }
+
+        tracing::info!(
+            "monocle: entered (previous={:?}, {} windows)",
+            previous_mode,
+            window_count,
+        );
+    }
+
+    /// Exit monocle mode and restore the previous layout.
+    pub fn exit_monocle(
+        &mut self,
+        seat: &Seat<State>,
+        workspace_state: &mut crate::wayland::protocols::workspace::WorkspaceUpdateGuard<'_, State>,
+    ) {
+        let Some(restore) = self.monocle_restore.take() else {
+            return;
+        };
+
+        // Un-maximize all windows.
+        let windows: Vec<CosmicMapped> = self.mapped().cloned().collect();
+        for mapped in &windows {
+            mapped.set_maximized(false);
+        }
+
+        self.layout_mode = restore.previous_mode;
+
+        // Restore the appropriate layout.
+        match restore.previous_mode {
+            LayoutMode::Tiling => {
+                if !self.tiling_enabled {
+                    self.set_tiling(true, seat, workspace_state);
+                }
+                // Tiling layer will re-layout on next recalculate().
+                self.tiling_layer.recalculate();
+            }
+            LayoutMode::Floating | LayoutMode::Monocle => {
+                // Windows keep their current positions.
+                // Floating layer will handle them.
+            }
+        }
+
+        tracing::info!("monocle: exited to {:?}", restore.previous_mode);
+    }
+
+    /// Toggle monocle mode.
+    pub fn toggle_monocle(
+        &mut self,
+        seat: &Seat<State>,
+        workspace_state: &mut crate::wayland::protocols::workspace::WorkspaceUpdateGuard<'_, State>,
+    ) {
+        if self.layout_mode == LayoutMode::Monocle {
+            self.exit_monocle(seat, workspace_state);
+        } else {
+            self.enter_monocle(seat, workspace_state);
+        }
+    }
+
+    /// Check if this workspace is in monocle mode.
+    pub fn is_monocle(&self) -> bool {
+        self.layout_mode == LayoutMode::Monocle
     }
 
     pub fn mapped(&self) -> impl Iterator<Item = &CosmicMapped> {

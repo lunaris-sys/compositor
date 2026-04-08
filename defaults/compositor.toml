@@ -38,6 +38,31 @@ size = 24
 enabled = true
 workspace_switch_duration = 250  # ms
 
+[layout]
+inner_gap = 8         # Gap between tiled windows (px)
+outer_gap = 8         # Gap at screen edges (px)
+smart_gaps = true     # No gaps when single window
+
+# [[layout.window_rules]]
+# match = { app_id = "pavucontrol" }
+# action = "float"
+#
+# [[layout.window_rules]]
+# match = { app_id = "firefox", title = ".*Picture-in-Picture.*" }
+# action = "float"
+
+# [keybindings]
+# "Super+T" = "toggle_tiling"
+# "Super+Shift+Space" = "toggle_window_floating"
+# "Super+H" = "focus_left"
+# "Super+J" = "focus_down"
+# "Super+K" = "focus_up"
+# "Super+L" = "focus_right"
+# "Super+Shift+H" = "move_left"
+# "Super+Shift+J" = "move_down"
+# "Super+Shift+K" = "move_up"
+# "Super+Shift+L" = "move_right"
+
 [tiling]
 autotile = false
 focus_follows_cursor = false

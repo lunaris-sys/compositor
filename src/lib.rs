@@ -162,6 +162,10 @@ pub fn run(hooks: crate::hooks::Hooks) -> Result<(), Box<dyn Error>> {
     // init backend
     backend::init_backend_auto(&display, &mut event_loop, &mut state)?;
 
+    // Load appearance.toml overrides BEFORE watch_theme so the very
+    // first composed theme already reflects user overrides. Both
+    // watchers live-reload independently but compose the same pipeline.
+    config::appearance::watch(event_loop.handle());
     theme::watch_theme(event_loop.handle());
 
     // run the event loop

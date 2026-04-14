@@ -21,6 +21,14 @@ fn set_lunaris_theme(theme: lunaris_theme::LunarisTheme) {
     *LUNARIS_THEME.write().unwrap() = Some(theme);
 }
 
+/// Public setter used by the appearance watcher after composing the
+/// effective theme (theme.toml base + appearance.toml overrides).
+/// Kept separate from the private `set_lunaris_theme` to make the
+/// call-site intent explicit.
+pub fn replace_lunaris_theme(theme: lunaris_theme::LunarisTheme) {
+    set_lunaris_theme(theme);
+}
+
 /// Active window hint color from LunarisTheme as [r, g, b].
 pub(crate) fn lunaris_hint_rgb(lt: &lunaris_theme::LunarisTheme) -> [f32; 3] {
     if let Some(hint) = lt.window_hint {
@@ -30,14 +38,26 @@ pub(crate) fn lunaris_hint_rgb(lt: &lunaris_theme::LunarisTheme) -> [f32; 3] {
     }
 }
 
+/// Compose a fresh theme.toml load with any current appearance.toml
+/// overrides. This is the single source of the "effective" theme used
+/// by the compositor render paths.
+fn compose_effective_theme() -> lunaris_theme::LunarisTheme {
+    let mut base = lunaris_theme::LunarisTheme::load();
+    if let Some(overrides) = crate::config::appearance::current_appearance() {
+        crate::config::appearance::apply_to_theme(&mut base, &overrides);
+    }
+    base
+}
+
 /// Initialize the global LunarisTheme and start a file watcher for live updates.
 pub fn watch_theme(handle: LoopHandle<'_, State>) {
-    // Initialize the global.
-    set_lunaris_theme(lunaris_theme::LunarisTheme::load());
+    // Initialize the global with the composed theme so the very first
+    // frame already reflects both theme.toml and appearance.toml.
+    set_lunaris_theme(compose_effective_theme());
 
     let (lt_ping_tx, lt_ping_rx) = calloop::ping::make_ping().unwrap();
     if let Err(e) = handle.insert_source(lt_ping_rx, move |_, _, state| {
-        let lt = lunaris_theme::LunarisTheme::load();
+        let lt = compose_effective_theme();
         set_lunaris_theme(lt.clone());
         state.common.lunaris_theme = lt.clone();
         let mut shell = state.common.shell.write();

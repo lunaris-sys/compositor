@@ -39,6 +39,7 @@ use std::{
 };
 use tracing::{error, warn};
 
+pub mod appearance;
 mod input_config;
 pub mod key_bindings;
 mod types;

@@ -88,8 +88,12 @@ pub fn default_path() -> PathBuf {
 /// app writes there directly.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WindowSection {
+    /// Corner radius in pixels. Integer — matches the Settings app
+    /// slider, which only emits whole numbers. Using `f32` here would
+    /// cause silent deserialization failures because TOML does not
+    /// implicitly cast integers to floats.
     #[serde(default)]
-    pub corner_radius: Option<f32>,
+    pub corner_radius: Option<u32>,
     #[serde(default)]
     pub border_width: Option<u32>,
     #[serde(default)]
@@ -190,9 +194,9 @@ pub fn apply_to_theme(theme: &mut lunaris_theme::LunarisTheme, cfg: &AppearanceC
     let w = &cfg.window;
 
     if let Some(radius) = w.corner_radius {
-        let r = radius.max(0.0);
+        let r = radius as f32;
         theme.radius_s = [r, r, r, r];
-        tracing::debug!("appearance: applied radius {r}");
+        tracing::info!("appearance: applied radius {r}");
     }
 
     if let Some(bw) = w.border_width {

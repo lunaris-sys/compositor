@@ -483,14 +483,17 @@ impl CosmicWindow {
     {
         let (has_ssd, is_tiled, is_maximized, mut radii, appearance) = {
             let p = self.p();
+            let raw_radius = crate::theme::lunaris_theme().radius_s;
+            let mapped = raw_radius
+                .map(|x| if x < 4.0 { x } else { x + 4.0 })
+                .map(|x| x.round() as u8);
+            // Trace: uncomment to debug radius propagation
+            // tracing::trace!("window render: raw_radius={raw_radius:?} mapped={mapped:?}");
             (
                 p.has_ssd(false),
                 p.is_tiled(),
                 p.window.is_maximized(false),
-                crate::theme::lunaris_theme()
-                    .radius_s
-                    .map(|x| if x < 4.0 { x } else { x + 4.0 })
-                    .map(|x| x.round() as u8),
+                mapped,
                 *p.appearance_conf.lock().unwrap(),
             )
         };

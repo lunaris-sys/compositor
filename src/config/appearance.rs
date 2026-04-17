@@ -413,3 +413,150 @@ fn handle_reload(path: &Path, state: &mut State) {
         state.backend.schedule_render(&output);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Hex parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_hex_parse_rgb_short() {
+        let rgb = parse_hex_rgb("#fff").unwrap();
+        assert!((rgb[0] - 1.0).abs() < 0.01, "r should be 1.0");
+        assert!((rgb[1] - 1.0).abs() < 0.01, "g should be 1.0");
+        assert!((rgb[2] - 1.0).abs() < 0.01, "b should be 1.0");
+    }
+
+    #[test]
+    fn test_hex_parse_rrggbb() {
+        let rgb = parse_hex_rgb("#6366f1").unwrap();
+        assert!((rgb[0] - 99.0 / 255.0).abs() < 0.01, "r");
+        assert!((rgb[1] - 102.0 / 255.0).abs() < 0.01, "g");
+        assert!((rgb[2] - 241.0 / 255.0).abs() < 0.01, "b");
+    }
+
+    #[test]
+    fn test_hex_parse_rrggbbaa_ignores_alpha() {
+        let rgb = parse_hex_rgb("#6366f180").unwrap();
+        assert!((rgb[0] - 99.0 / 255.0).abs() < 0.01, "r same as without alpha");
+    }
+
+    #[test]
+    fn test_hex_parse_invalid() {
+        assert!(parse_hex_rgb("not-hex").is_none());
+        assert!(parse_hex_rgb("#xyz").is_none());
+        assert!(parse_hex_rgb("#12345").is_none());
+        assert!(parse_hex_rgb("").is_none());
+    }
+
+    // ── Config parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_empty_string() {
+        let cfg: AppearanceConfig = toml::from_str("").unwrap();
+        assert!(cfg.window.corner_radius.is_none());
+        assert!(cfg.window.border_width.is_none());
+        assert!(cfg.window.border.focused.is_none());
+    }
+
+    #[test]
+    fn test_parse_partial_window() {
+        let cfg: AppearanceConfig = toml::from_str(
+            "[window]\ncorner_radius = 12\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.window.corner_radius, Some(12));
+        assert!(cfg.window.border_width.is_none());
+    }
+
+    #[test]
+    fn test_parse_border_sentinels() {
+        let cfg: AppearanceConfig = toml::from_str(
+            "[window.border]\nfocused = \"$accent\"\nunfocused = \"$border\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.window.border.focused.as_deref(), Some("$accent"));
+        assert_eq!(cfg.window.border.unfocused.as_deref(), Some("$border"));
+    }
+
+    #[test]
+    fn test_parse_theme_and_overrides() {
+        let cfg: AppearanceConfig = toml::from_str(
+            "[theme]\nactive = \"light\"\nmode = \"light\"\n\n[overrides]\naccent = \"$foreground\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.theme.mode.as_deref(), Some("light"));
+        assert_eq!(cfg.overrides.accent.as_deref(), Some("$foreground"));
+    }
+
+    // ── apply_to_theme ───────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_radius() {
+        let mut theme = lunaris_theme::LunarisTheme::panda();
+        let cfg: AppearanceConfig = toml::from_str("[window]\ncorner_radius = 0\n").unwrap();
+        apply_to_theme(&mut theme, &cfg);
+        assert_eq!(theme.radius_s, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_apply_border_width() {
+        let mut theme = lunaris_theme::LunarisTheme::panda();
+        let cfg: AppearanceConfig = toml::from_str("[window]\nborder_width = 3\n").unwrap();
+        apply_to_theme(&mut theme, &cfg);
+        assert_eq!(theme.active_hint, 3);
+    }
+
+    // ── Sentinel resolution ──────────────────────────────────────────
+
+    #[test]
+    fn test_effective_accent_foreground_dark() {
+        let cfg: AppearanceConfig = toml::from_str(
+            "[theme]\nmode = \"dark\"\n\n[overrides]\naccent = \"$foreground\"\n",
+        )
+        .unwrap();
+        let theme = lunaris_theme::LunarisTheme::panda();
+        let rgb = effective_accent(&cfg, &theme);
+        // MONO_DARK = #fafafa → ~0.98
+        assert!(rgb[0] > 0.95, "dark monochrome should be near-white: {}", rgb[0]);
+    }
+
+    #[test]
+    fn test_effective_accent_foreground_light() {
+        let cfg: AppearanceConfig = toml::from_str(
+            "[theme]\nmode = \"light\"\n\n[overrides]\naccent = \"$foreground\"\n",
+        )
+        .unwrap();
+        let theme = lunaris_theme::LunarisTheme::panda();
+        let rgb = effective_accent(&cfg, &theme);
+        // MONO_LIGHT = #171717 → ~0.09
+        assert!(rgb[0] < 0.15, "light monochrome should be near-black: {}", rgb[0]);
+    }
+
+    #[test]
+    fn test_effective_accent_hex_override() {
+        let cfg: AppearanceConfig = toml::from_str(
+            "[overrides]\naccent = \"#ff0000\"\n",
+        )
+        .unwrap();
+        let theme = lunaris_theme::LunarisTheme::panda();
+        let rgb = effective_accent(&cfg, &theme);
+        assert!((rgb[0] - 1.0).abs() < 0.01, "red channel");
+        assert!(rgb[1] < 0.01, "green channel");
+    }
+
+    #[test]
+    fn test_effective_accent_no_override_falls_back_to_theme() {
+        let cfg: AppearanceConfig = toml::from_str("").unwrap();
+        let theme = lunaris_theme::LunarisTheme::panda();
+        let rgb = effective_accent(&cfg, &theme);
+        // Falls back to theme.accent_rgb() — Panda accent.
+        let expected = theme.accent_rgb();
+        assert_eq!(rgb, expected);
+    }
+}

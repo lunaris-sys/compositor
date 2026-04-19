@@ -108,6 +108,61 @@ fn move_fullscreen_next_workspace(state: &mut State, surface: &CosmicSurface) {
     }
 }
 
+/// Move a mapped window to an arbitrary workspace identified by its
+/// handle. Generalises `move_element_prev_workspace` and its `_next`
+/// sibling — the context menu builds one item per workspace and needs
+/// to capture a specific target, not "one step in a direction".
+fn move_element_to_handle(
+    state: &mut State,
+    mapped: &CosmicMapped,
+    target: WorkspaceHandle,
+) {
+    tracing::info!("move_element_to_handle: entered, target={target:?}");
+    let mut shell = state.common.shell.write();
+    let window = mapped.active_window();
+    let Some(wl_surface) = window.wl_surface() else {
+        tracing::warn!("move_element_to_handle: no wl_surface on active window");
+        return;
+    };
+    // `from` is still derived on the fly (not captured) so this works
+    // correctly even if the user moves the window to another workspace
+    // between right-click and selection.
+    let Some((from, _)) = shell.workspace_for_surface(&wl_surface) else {
+        tracing::warn!("move_element_to_handle: workspace_for_surface returned None");
+        return;
+    };
+    tracing::info!("move_element_to_handle: from={from:?} target={target:?}");
+    if from == target {
+        tracing::info!("move_element_to_handle: from == target, skipping");
+        return;
+    }
+
+    let seat = shell.seats.last_active().clone();
+    let res = shell.move_element(
+        Some(&seat),
+        mapped,
+        &from,
+        &target,
+        true,
+        None,
+        &mut state.common.workspace_state.update(),
+    );
+    tracing::info!(
+        "move_element_to_handle: move_element returned Some={}",
+        res.is_some()
+    );
+    if let Some((target_kbd, _)) = res {
+        std::mem::drop(shell);
+        Shell::set_focus(state, Some(&target_kbd), &seat, None, true);
+        tracing::info!("move_element_to_handle: set_focus done");
+    } else {
+        tracing::warn!(
+            "move_element_to_handle: move_element returned None (window not mapped \
+             on source workspace, or follow activation failed)"
+        );
+    }
+}
+
 fn move_element_prev_workspace(state: &mut State, mapped: &CosmicMapped) {
     let mut shell = state.common.shell.write();
     let window = mapped.active_window();
@@ -224,6 +279,16 @@ pub fn tab_items(
     .into_iter()
 }
 
+/// One row of the Move-to-Workspace listing fed into the window menu.
+/// `is_current` is true for the workspace the window is currently on
+/// — that entry renders disabled so the user can't move a window to
+/// where it already lives.
+pub struct WorkspaceMenuEntry {
+    pub handle: WorkspaceHandle,
+    pub label: String,
+    pub is_current: bool,
+}
+
 pub fn window_items(
     window: &CosmicMapped,
     is_tiled: bool,
@@ -232,13 +297,12 @@ pub fn window_items(
     tiling_enabled: bool,
     possible_resizes: ResizeEdge,
     config: &Config,
+    workspaces: &[WorkspaceMenuEntry],
 ) -> impl Iterator<Item = Item> {
     let minimize_clone = window.clone();
     let maximize_clone = window.clone();
     let fullscreen_clone = window.clone();
     let tile_clone = window.clone();
-    let move_prev_clone = window.clone();
-    let move_next_clone = window.clone();
     let move_clone = window.clone();
     let resize_top_clone = window.clone();
     let resize_left_clone = window.clone();
@@ -249,6 +313,39 @@ pub fn window_items(
     let stack_clone = window.clone();
     let sticky_clone = window.clone();
     let close_clone = window.clone();
+    let close_all_clone = window.clone();
+    let workspace_clone = window.clone();
+    // `Action::Close` is resolved once here; the `.chain` closure
+    // below captures the resulting `Option<String>` rather than the
+    // `&Config` reference so it survives the function scope.
+    let close_shortcut = config.shortcut_for_action(&Action::Close);
+
+    // Build the "Move to Workspace" submenu up front. Children are one
+    // entry per workspace on the window's output; the current workspace
+    // renders disabled so a user can't "move" a window to where it
+    // already lives. Sticky windows have the whole submenu disabled
+    // (they live on every workspace, so the operation is meaningless).
+    let workspace_children: Vec<Item> = workspaces
+        .iter()
+        .map(|entry| {
+            let mapped = workspace_clone.clone();
+            let target = entry.handle;
+            let disabled = is_sticky || entry.is_current;
+            Item::new(entry.label.clone(), move |handle| {
+                let mapped = mapped.clone();
+                let _ = handle.insert_idle(move |state| {
+                    move_element_to_handle(state, &mapped, target);
+                });
+            })
+            .disabled(disabled)
+            // `action` is only used by the shell for icon/styling.
+            // Dispatch is index-based, not action-based, so reusing
+            // `MoveNextWorkspace` for every row is harmless.
+            .action(WindowAction::MoveNextWorkspace)
+        })
+        .collect();
+    let workspace_submenu =
+        Item::new_submenu(fl!("window-menu-move-to-workspace"), workspace_children);
 
     vec![
         (!is_stacked).then_some(
@@ -537,61 +634,43 @@ pub fn window_items(
             .disabled(!possible_resizes.contains(ResizeEdge::BOTTOM))
             .action(WindowAction::ResizeBottom),
         ),
-        Some(
-            Item::new(fl!("window-menu-move-prev-workspace"), move |handle| {
-                let mapped = move_prev_clone.clone();
-                let _ =
-                    handle.insert_idle(move |state| move_element_prev_workspace(state, &mapped));
-            })
-            .shortcut(config.shortcut_for_action(&Action::MoveToPreviousWorkspace))
-            .disabled(is_sticky)
-            .action(WindowAction::MovePrevWorkspace),
-        ),
-        Some(
-            Item::new(fl!("window-menu-move-next-workspace"), move |handle| {
-                let mapped = move_next_clone.clone();
-                let _ =
-                    handle.insert_idle(move |state| move_element_next_workspace(state, &mapped));
-            })
-            .shortcut(config.shortcut_for_action(&Action::MoveToNextWorkspace))
-            .disabled(is_sticky)
-            .action(WindowAction::MoveNextWorkspace),
-        ),
-        Some(Item::Separator),
-        Some(
-            Item::new(fl!("window-menu-sticky"), move |handle| {
-                let mapped = sticky_clone.clone();
-                let _ = handle.insert_idle(move |state| {
-                    let mut shell = state.common.shell.write();
-                    let seat = shell.seats.last_active().clone();
-                    shell.toggle_sticky(&seat, &mapped);
-                });
-            })
-            .toggled(is_sticky)
-            .action(WindowAction::Sticky),
-        ),
-        Some(Item::Separator),
-        if is_stacked {
-            Some(
-                Item::new(fl!("window-menu-close-all"), move |_handle| {
-                    for (window, _) in close_clone.windows() {
-                        window.close();
-                    }
-                })
-                .action(WindowAction::CloseAll),
-            )
-        } else {
-            Some(
-                Item::new(fl!("window-menu-close"), move |_handle| {
-                    close_clone.send_close();
-                })
-                .shortcut(config.shortcut_for_action(&Action::Close))
-                .action(WindowAction::Close),
-            )
-        },
     ]
     .into_iter()
     .flatten()
+    // Move-to-Workspace block rendered as a real submenu via
+    // `lunaris-shell-overlay-v1`'s `parent_index` / `has_submenu`
+    // fields. The shell builds a tree from the flat DFS stream
+    // and renders the children with bits-ui `ContextMenu.Sub`.
+    .chain(std::iter::once(Item::Separator))
+    .chain(std::iter::once(workspace_submenu))
+    .chain(std::iter::once(Item::Separator))
+    .chain(std::iter::once(
+        Item::new(fl!("window-menu-sticky"), move |handle| {
+            let mapped = sticky_clone.clone();
+            let _ = handle.insert_idle(move |state| {
+                let mut shell = state.common.shell.write();
+                let seat = shell.seats.last_active().clone();
+                shell.toggle_sticky(&seat, &mapped);
+            });
+        })
+        .toggled(is_sticky)
+        .action(WindowAction::Sticky),
+    ))
+    .chain(std::iter::once(Item::Separator))
+    .chain(std::iter::once(if is_stacked {
+        Item::new(fl!("window-menu-close-all"), move |_handle| {
+            for (window, _) in close_all_clone.windows() {
+                window.close();
+            }
+        })
+        .action(WindowAction::CloseAll)
+    } else {
+        Item::new(fl!("window-menu-close"), move |_handle| {
+            close_clone.send_close();
+        })
+        .shortcut(close_shortcut)
+        .action(WindowAction::Close)
+    }))
 }
 
 pub fn fullscreen_items(window: &CosmicSurface, config: &Config) -> impl Iterator<Item = Item> {

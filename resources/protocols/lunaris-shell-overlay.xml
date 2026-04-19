@@ -38,22 +38,34 @@
         index is used when the shell sends activate back to the compositor.
         shortcut may be an empty string if no shortcut is defined.
         toggled and disabled are boolean (0 or 1).
+
+        Tree structure: parent_index is the index of the parent submenu item
+        this entry belongs to, or 0xFFFFFFFF (u32::MAX) if the entry is
+        top-level. label is the display string; when empty the shell derives
+        it from action. has_submenu is 1 for entries that open a submenu
+        (their action is ignored on activate); children of such an entry
+        follow in the flat stream with parent_index set to this item's index.
       </description>
       <arg name="menu_id" type="uint" summary="menu instance id"/>
       <arg name="index" type="uint" summary="item index, used for activation"/>
-      <arg name="action" type="uint" enum="window_action" summary="the action this item triggers"/>
+      <arg name="action" type="uint" enum="window_action" summary="the action this item triggers (ignored if has_submenu=1)"/>
       <arg name="toggled" type="uint" summary="1 if item is in toggled/checked state"/>
       <arg name="disabled" type="uint" summary="1 if item is disabled/grayed out"/>
       <arg name="shortcut" type="string" summary="keyboard shortcut label, may be empty"/>
+      <arg name="parent_index" type="uint" summary="index of parent submenu item, or 0xFFFFFFFF if top-level"/>
+      <arg name="label" type="string" summary="display label; empty string means derive from action"/>
+      <arg name="has_submenu" type="uint" summary="1 if this item opens a submenu"/>
     </event>
 
     <event name="context_menu_separator">
       <description summary="a separator in the context menu">
         Sent in place of context_menu_item for visual separators.
         index is incremented as normal so subsequent item indices remain stable.
+        parent_index follows the same semantics as on context_menu_item.
       </description>
       <arg name="menu_id" type="uint" summary="menu instance id"/>
       <arg name="index" type="uint" summary="separator index"/>
+      <arg name="parent_index" type="uint" summary="index of parent submenu item, or 0xFFFFFFFF if top-level"/>
     </event>
 
     <event name="context_menu_done">
@@ -361,6 +373,7 @@
 
     <enum name="window_action">
       <description summary="window management actions for context menu items"/>
+      <entry name="none"                 value="0"  summary="no action (submenu header or placeholder)"/>
       <entry name="minimize"             value="1"  summary="minimize the window"/>
       <entry name="maximize"             value="2"  summary="toggle maximize"/>
       <entry name="fullscreen"           value="3"  summary="toggle fullscreen"/>

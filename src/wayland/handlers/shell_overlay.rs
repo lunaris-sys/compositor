@@ -21,7 +21,15 @@ impl ShellOverlayHandler for State {
     }
 
     fn context_menu_activate(&mut self, menu_id: u32, index: u32) {
-        tracing::info!("context_menu_activate: menu_id={menu_id} index={index}");
+        tracing::info!(
+            "context_menu_activate: menu_id={menu_id} index={index} \
+             callbacks_len={}",
+            self.common
+                .pending_menu_callbacks
+                .get(&menu_id)
+                .map(|v| v.len())
+                .unwrap_or(0)
+        );
         let Some(callbacks) = self.common.pending_menu_callbacks.remove(&menu_id) else {
             tracing::warn!(
                 "shell_overlay: received activate for unknown menu_id {}",
@@ -31,20 +39,50 @@ impl ShellOverlayHandler for State {
         };
 
         let action_index = index as usize;
-        if let Some(item) = callbacks.get(action_index) {
-            if let Item::Entry { on_press, .. } = item {
-                let on_press = on_press.clone();
-                let _ = self
-                    .common
-                    .event_loop_handle
-                    .insert_idle(move |state| (on_press)(&state.common.event_loop_handle));
+        match callbacks.get(action_index) {
+            Some(Item::Entry { title, action, disabled, on_press, .. }) => {
+                tracing::info!(
+                    "context_menu_activate: resolved to Entry title={title:?} \
+                     action={action:?} disabled={disabled}"
+                );
+                if *disabled {
+                    tracing::info!(
+                        "context_menu_activate: skipping disabled entry at index {action_index}"
+                    );
+                } else {
+                    let on_press = on_press.clone();
+                    let _ = self
+                        .common
+                        .event_loop_handle
+                        .insert_idle(move |state| {
+                            tracing::info!(
+                                "context_menu_activate: firing on_press for index {action_index}"
+                            );
+                            (on_press)(&state.common.event_loop_handle);
+                        });
+                }
             }
-        } else {
-            tracing::warn!(
-                "shell_overlay: activate index {} out of range for menu_id {}",
-                action_index,
-                menu_id
-            );
+            Some(Item::Submenu { title, .. }) => {
+                tracing::warn!(
+                    "context_menu_activate: index {action_index} resolved to \
+                     Submenu header {title:?} — shell should not have activated this"
+                );
+            }
+            Some(Item::Separator) => {
+                tracing::warn!(
+                    "context_menu_activate: index {action_index} resolved to \
+                     Separator — shell should not have activated this"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    "shell_overlay: activate index {} out of range for menu_id {} \
+                     (callbacks.len={})",
+                    action_index,
+                    menu_id,
+                    callbacks.len()
+                );
+            }
         }
 
         unset_overlay_grab(self, menu_id);

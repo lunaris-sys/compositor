@@ -204,21 +204,34 @@ pub fn apply_to_theme(theme: &mut lunaris_theme::LunarisTheme, cfg: &AppearanceC
         tracing::debug!("appearance: applied border_width {bw}");
     }
 
-    if let Some(ref color) = w.border.focused {
-        match resolve_focused(color, cfg, theme) {
-            Some(rgb) => {
-                theme.window_hint = Some([rgb[0], rgb[1], rgb[2], 1.0]);
-                tracing::info!(
-                    "appearance: window_hint <- {:?} (from {color:?})",
-                    theme.window_hint
-                );
-            }
-            None => {
-                tracing::warn!(
-                    "appearance: unrecognised [window.border].focused = {:?}",
-                    color
-                );
-            }
+    // Focus border color. Explicit user setting wins; otherwise follow
+    // the user's `[overrides].accent` if they configured one; otherwise
+    // default to the mode-aware monochrome foreground (white on dark,
+    // black on light). Lunaris is monochrome-first — we do not fall
+    // through to the legacy Panda `accent` (near-black) because that
+    // makes the focus ring invisible on a dark shell surface, and we
+    // never silently inject a chromatic colour the user did not ask for.
+    let focused_rgb = if let Some(ref color) = w.border.focused {
+        resolve_focused(color, cfg, theme)
+    } else if cfg.overrides.accent.is_some() {
+        Some(effective_accent(cfg, theme))
+    } else {
+        Some(monochrome_for_mode(&cfg.theme))
+    };
+    match focused_rgb {
+        Some(rgb) => {
+            theme.window_hint = Some([rgb[0], rgb[1], rgb[2], 1.0]);
+            tracing::info!(
+                "appearance: window_hint <- {:?} (from {:?})",
+                theme.window_hint,
+                w.border.focused.as_deref().unwrap_or("<default:$accent>"),
+            );
+        }
+        None => {
+            tracing::warn!(
+                "appearance: unrecognised [window.border].focused = {:?}",
+                w.border.focused
+            );
         }
     }
 

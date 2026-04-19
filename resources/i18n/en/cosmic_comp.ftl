@@ -16,6 +16,7 @@ window-menu-move = Move
 window-menu-resize = Resize
 window-menu-move-prev-workspace = Move to previous workspace
 window-menu-move-next-workspace = Move to next workspace
+window-menu-move-to-workspace = Move to Workspace
 window-menu-stack = Create window stack
 window-menu-unstack-all = Unstack windows
 window-menu-unstack = Unstack window

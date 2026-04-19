@@ -496,8 +496,19 @@ fn load_toml_config(path: &std::path::Path) -> TomlConfig {
         config.xkb_config.layout,
     );
 
+    // An empty TOML `[xkb_config].layout` is the *expected* default for
+    // most users — the `Config::xkb_config()` method will fill it later
+    // from the fallback chain ($XKB_DEFAULT_LAYOUT → `localectl` →
+    // `/etc/vconsole.conf`). A WARN at this point caused noisy spam
+    // every config reload and confused users into thinking their
+    // keyboard was broken. Keep it at DEBUG so the resolution path can
+    // still be inspected when it's actually needed.
     if config.xkb_config.layout.is_empty() {
-        tracing::warn!("XKB layout is EMPTY after loading TOML from {}", path.display());
+        tracing::debug!(
+            "no explicit [xkb_config].layout in {} — will use fallback \
+             chain (XKB_DEFAULT_LAYOUT → localectl → /etc/vconsole.conf)",
+            path.display()
+        );
     }
 
     let layout = parse_layout_config(&table);
@@ -1320,6 +1331,27 @@ impl Config {
             if let Some(vconsole) = parse_vconsole_keymap() {
                 cfg.layout = vconsole;
             }
+        }
+        // If even the last-resort chain didn't find anything, the user
+        // really has no resolvable XKB layout — warn once per process
+        // so keyboard issues have a log trail instead of failing
+        // silently. Noisy repeats are suppressed via `XKB_WARNED`.
+        if cfg.layout.is_empty() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static XKB_WARNED: AtomicBool = AtomicBool::new(false);
+            if !XKB_WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "unable to resolve XKB layout: no TOML [xkb_config], \
+                     no XKB_DEFAULT_LAYOUT env, no `localectl` entry, \
+                     no /etc/vconsole.conf KEYMAP — keyboard input may \
+                     fall back to the XKB built-in default"
+                );
+            }
+        } else {
+            tracing::debug!(
+                "xkb layout resolved: layout={:?} variant={:?} options={:?}",
+                cfg.layout, cfg.variant, cfg.options
+            );
         }
         cfg
     }

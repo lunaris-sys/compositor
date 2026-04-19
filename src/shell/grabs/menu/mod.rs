@@ -119,6 +119,32 @@ impl fmt::Debug for Item {
     }
 }
 
+/// Flatten a tree of `Item` into a DFS-ordered `Vec<Item>` so that the
+/// index the shell sends back in `activate(menu_id, index)` resolves to
+/// the matching `on_press` closure.
+///
+/// Walk order must match `ShellOverlayState::send_context_menu`'s
+/// recursive serializer exactly: each item receives one slot, and a
+/// submenu header is followed immediately by its children (recursively).
+/// The unit test in this module locks this invariant.
+pub fn flatten_callbacks(items: &[Item]) -> Vec<Item> {
+    let mut out = Vec::new();
+    flatten_callbacks_into(items, &mut out);
+    out
+}
+
+fn flatten_callbacks_into(items: &[Item], out: &mut Vec<Item>) {
+    for item in items {
+        match item {
+            Item::Submenu { items: children, .. } => {
+                out.push(item.clone());
+                flatten_callbacks_into(children, out);
+            }
+            _ => out.push(item.clone()),
+        }
+    }
+}
+
 impl Item {
     pub fn new<S: Into<String>, F: Fn(&LoopHandle<'_, State>) + Send + Sync + 'static>(
         title: S,
@@ -639,5 +665,129 @@ impl Drop for MenuGrab {
         // from Drop because `LoopHandle` is not `Send` and cannot be stored here.
         // Explicit compositor-side teardown (e.g. window destroyed while menu is
         // open) must call `ShellOverlayState::close_context_menu` at the call site.
+    }
+}
+
+// ===== Tests =====
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Labels collected during the same recursive walk the real Wayland
+    /// serializer performs (see `ShellOverlayState::send_items_recursive`).
+    /// A test double that only records the kind + label at each counter
+    /// position — enough to compare index-by-index with `flatten_callbacks`.
+    fn serializer_walk(items: &[Item]) -> Vec<(u32, String)> {
+        fn recurse(items: &[Item], counter: &mut u32, out: &mut Vec<(u32, String)>) {
+            for item in items {
+                let my_index = *counter;
+                *counter += 1;
+                match item {
+                    Item::Separator => out.push((my_index, "Separator".into())),
+                    Item::Entry { title, .. } => {
+                        out.push((my_index, format!("Entry:{title}")))
+                    }
+                    Item::Submenu { title, items: children } => {
+                        out.push((my_index, format!("Submenu:{title}")));
+                        recurse(children, counter, out);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let mut counter = 0;
+        recurse(items, &mut counter, &mut out);
+        out
+    }
+
+    /// Same projection applied to the flattened callback Vec.
+    fn flatten_labels(items: &[Item]) -> Vec<(u32, String)> {
+        flatten_callbacks(items)
+            .into_iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let label = match &it {
+                    Item::Separator => "Separator".to_string(),
+                    Item::Entry { title, .. } => format!("Entry:{title}"),
+                    Item::Submenu { title, .. } => format!("Submenu:{title}"),
+                };
+                (i as u32, label)
+            })
+            .collect()
+    }
+
+    fn entry(title: &str) -> Item {
+        Item::new(title.to_string(), |_| {})
+    }
+
+    #[test]
+    fn flat_menu_indices_match_serializer() {
+        let items = vec![
+            entry("Minimize"),
+            Item::Separator,
+            entry("Maximize"),
+            entry("Close"),
+        ];
+        assert_eq!(serializer_walk(&items), flatten_labels(&items));
+    }
+
+    #[test]
+    fn submenu_indices_match_serializer() {
+        // Mirrors the real window menu shape: flat entries, a
+        // "Move to Workspace" submenu with numeric children, then
+        // more flat entries after.
+        let items = vec![
+            entry("Minimize"),
+            entry("Maximize"),
+            Item::Separator,
+            Item::new_submenu(
+                "Move to Workspace",
+                vec![entry("1"), entry("2"), entry("3")],
+            ),
+            Item::Separator,
+            entry("Sticky"),
+            entry("Close"),
+        ];
+        let serializer = serializer_walk(&items);
+        let flatten = flatten_labels(&items);
+        assert_eq!(
+            serializer, flatten,
+            "serializer DFS indices must match flatten_callbacks order"
+        );
+
+        // Explicit expected sequence so a regression is obvious.
+        assert_eq!(
+            serializer,
+            vec![
+                (0, "Entry:Minimize".into()),
+                (1, "Entry:Maximize".into()),
+                (2, "Separator".into()),
+                (3, "Submenu:Move to Workspace".into()),
+                (4, "Entry:1".into()),
+                (5, "Entry:2".into()),
+                (6, "Entry:3".into()),
+                (7, "Separator".into()),
+                (8, "Entry:Sticky".into()),
+                (9, "Entry:Close".into()),
+            ],
+        );
+    }
+
+    #[test]
+    fn nested_submenus_match_serializer() {
+        let items = vec![
+            entry("A"),
+            Item::new_submenu(
+                "Outer",
+                vec![
+                    entry("B"),
+                    Item::new_submenu("Inner", vec![entry("C"), entry("D")]),
+                    entry("E"),
+                ],
+            ),
+            entry("F"),
+        ];
+        assert_eq!(serializer_walk(&items), flatten_labels(&items));
     }
 }

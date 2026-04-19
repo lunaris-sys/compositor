@@ -654,23 +654,34 @@ impl WorkspaceSet {
             self.add_empty_workspace(state);
         }
 
-        // remove other empty workspaces
+        // Remove empty workspaces only when safe for stable position labels.
+        //
+        // Lunaris deviates from upstream cosmic here: the top-bar indicator
+        // labels workspaces by their position in the list (1, 2, 3, ...), so
+        // trimming an empty workspace BEFORE the active one silently shifts
+        // every subsequent label — the user clicks "Move to Workspace 2",
+        // sees the "2" pill light up for an instant, then watches the pill
+        // collapse back to "1" once the vacated source workspace is reaped.
+        //
+        // Rule: keep every empty workspace at or before `active`, plus the
+        // trailing empty spare. Also keep the workspace that a running
+        // activate-animation references (`previously_active`), so the slide
+        // has something to interpolate from until the animation settles.
+        // Empty workspaces in the "gap" between the active one and the
+        // trailing spare are reaped as in upstream so users don't accumulate
+        // dead slots by moving windows around.
         let len = self.workspaces.len();
         let kept: Vec<bool> = self
             .workspaces
             .iter()
             .enumerate()
             .map(|(i, workspace)| {
-                let previous_is_empty = i > 0
-                    && self
-                        .workspaces
-                        .get(i - 1)
-                        .is_some_and(|w| w.is_empty() && !w.pinned);
                 let keep = if workspace.can_auto_remove(xdg_activation_state) {
-                    // Keep empty workspace if it's active, or it's the last workspace,
-                    // and the previous worspace is not both active and empty.
-                    i == self.active
-                        || (i == len - 1 && !(i == self.active + 1 && previous_is_empty))
+                    i <= self.active
+                        || i == len - 1
+                        || self
+                            .previously_active
+                            .is_some_and(|(p_idx, _)| p_idx == i)
                 } else {
                     true
                 };
@@ -688,6 +699,28 @@ impl WorkspaceSet {
             .take(self.active + 1)
             .filter(|kept| !**kept)
             .count();
+
+        // `previously_active` holds the index of the workspace the user is
+        // animating AWAY FROM. If we just removed that workspace, the
+        // animation source no longer exists — clear it so the renderer
+        // snaps straight to `active` instead of interpolating against a
+        // stale index that now points at a different workspace. If the
+        // reference workspace survived but earlier workspaces were
+        // removed, shift the index down to keep pointing at the same
+        // workspace. Without this correction, `shell.move_element` +
+        // `follow=true` + auto-cleanup of the now-empty source workspace
+        // would leave `previously_active.idx` aliasing the target
+        // workspace, and the slide animation would visually start and
+        // end on the same position (user sees: window moves forward,
+        // then "springs back").
+        if let Some((p_idx, p_delta)) = self.previously_active {
+            if !kept.get(p_idx).copied().unwrap_or(false) {
+                self.previously_active = None;
+            } else {
+                let shift = kept.iter().take(p_idx).filter(|k| !**k).count();
+                self.previously_active = Some((p_idx - shift, p_delta));
+            }
+        }
 
         if kept.iter().any(|val| !(*val)) {
             self.update_workspace_idxs(state);
@@ -1737,6 +1770,11 @@ impl Shell {
         workspace_delta: WorkspaceDelta,
         workspace_state: &mut WorkspaceUpdateGuard<'_, State>,
     ) -> Result<Point<i32, Global>, InvalidWorkspaceIndex> {
+        tracing::info!(
+            "Shell::activate: output={} idx={}",
+            output.name(),
+            idx,
+        );
         match &mut self.workspaces.mode {
             WorkspaceMode::OutputBound => {
                 if let Some(set) = self.workspaces.sets.get_mut(output) {
@@ -3487,6 +3525,32 @@ impl Shell {
     ) -> Option<(KeyboardFocusTarget, Point<i32, Global>)> {
         let from_output = self.workspaces.space_for_handle(from)?.output.clone();
         let to_output = self.workspaces.space_for_handle(to)?.output.clone();
+        // Snapshot the source/target tiling modes and the window's current
+        // geometry before we touch anything. Useful for diagnosing a
+        // reported "window resizes unexpectedly after move" symptom: the
+        // most common cause is a tiling-mode mismatch between source and
+        // target workspace (floating on ws A, tiling on ws B) — moving
+        // the window forces it into the other layout and the resize is
+        // logically correct, but surprising UX. The logs make that
+        // explicit so we can tell apart "resize because of tiling" from
+        // "resize because of an actual bug".
+        let from_ws = self.workspaces.space_for_handle(from)?;
+        let to_ws = self.workspaces.space_for_handle(to)?;
+        let from_tiled = from_ws.tiling_enabled;
+        let to_tiled = to_ws.tiling_enabled;
+        let pre_geo = from_ws.element_geometry(mapped);
+        let pre_size = mapped.geometry().size;
+        tracing::info!(
+            "Shell::move_element: from={:?} to={:?} follow={} \
+             from_tiled={} to_tiled={} pre_element_geo={:?} pre_mapped_size={:?}",
+            from,
+            to,
+            follow,
+            from_tiled,
+            to_tiled,
+            pre_geo,
+            pre_size,
+        );
 
         let from_workspace = self.workspaces.space_for_handle_mut(from).unwrap(); // checked above
         let window_state = from_workspace.unmap_element(mapped)?;
@@ -3581,6 +3645,18 @@ impl Shell {
             toplevel_enter_workspace(&toplevel, to);
         }
 
+        // After-state snapshot: geometry on the target workspace + the
+        // window's own reported size. Compare with the pre-move snapshot
+        // above to tell whether the move caused a layout-driven resize.
+        let post_geo = self.workspaces.space_for_handle(to)
+            .and_then(|ws| ws.element_geometry(mapped));
+        let post_size = mapped.geometry().size;
+        tracing::info!(
+            "Shell::move_element: done; post_element_geo={:?} post_mapped_size={:?}",
+            post_geo,
+            post_size,
+        );
+
         new_pos.map(|pos| (focus_target, pos))
     }
 
@@ -3623,14 +3699,19 @@ impl Shell {
         pending_callbacks: &mut std::collections::HashMap<u32, Vec<Item>>,
     ) -> Option<(MenuGrab, Focus)> {
         /// Convert items to protocol representation.
-        /// Items without a `WindowAction` tag produce a `Separator` placeholder
-        /// so that indices in `pending_callbacks` stay aligned with the protocol list.
+        ///
+        /// Walks the tree recursively. `Item::Submenu` becomes a real
+        /// `ContextMenuItem::Submenu` (rendered as a fly-out by the shell).
+        /// Entries without a `WindowAction` tag fall back to a `Separator`
+        /// placeholder so indices in `pending_callbacks` stay aligned with
+        /// the DFS order of the protocol stream.
         fn items_to_protocol(items: &[Item]) -> Vec<ContextMenuItem> {
             items
                 .iter()
                 .map(|item| match item {
                     Item::Separator => ContextMenuItem::Separator,
                     Item::Entry {
+                        title,
                         action: Some(action),
                         toggled,
                         disabled,
@@ -3641,8 +3722,22 @@ impl Shell {
                         toggled: *toggled,
                         disabled: *disabled,
                         shortcut: shortcut.clone(),
+                        // Forward the compositor-side localized title so
+                        // the shell doesn't have to re-derive it from
+                        // `action`. Non-negotiable for items where many
+                        // entries share one `WindowAction` (e.g. the
+                        // workspace picker inside "Move to Workspace").
+                        label: Some(title.clone()),
                     },
-                    Item::Entry { action: None, .. } | Item::Submenu { .. } => {
+                    Item::Submenu {
+                        title,
+                        items: children,
+                    } => ContextMenuItem::Submenu {
+                        label: title.clone(),
+                        disabled: false,
+                        items: items_to_protocol(children),
+                    },
+                    Item::Entry { action: None, .. } => {
                         tracing::warn!(
                             "menu_request: item without WindowAction in overlay path; \
                              using Separator placeholder to preserve index alignment"
@@ -3652,6 +3747,10 @@ impl Shell {
                 })
                 .collect()
         }
+
+        // `flatten_callbacks` lives in `shell/grabs/menu/mod.rs` so it's
+        // covered by unit tests that lock the DFS-index invariant against
+        // the Wayland serializer in `ShellOverlayState::send_context_menu`.
 
         /// Find the desktop-shell's wl_surface by matching the overlay client.
         /// Returns the `PointerFocusTarget` and the surface origin in logical
@@ -3716,7 +3815,8 @@ impl Shell {
                                  is_tiled: bool,
                                  is_sticky: bool,
                                  tiling_enabled: bool,
-                                 edge: ResizeEdge| {
+                                 edge: ResizeEdge,
+                                 workspaces: Vec<crate::shell::grabs::menu::WorkspaceMenuEntry>| {
             let is_stacked = mapped.is_stack();
 
             if target_stack || !is_stacked {
@@ -3729,6 +3829,7 @@ impl Shell {
                         tiling_enabled,
                         edge,
                         config,
+                        &workspaces,
                     )
                     .collect::<Vec<Item>>()
                     .into_iter(),
@@ -3762,9 +3863,34 @@ impl Shell {
                 + relative_loc.as_local()
                 + location.as_local())
             .to_global(&output);
+            // Sticky windows aren't on any specific workspace, so the
+            // "Move to Workspace N" picker offers every workspace on
+            // this output as a potential target (no `is_current`).
+            let ws_entries = self
+                .workspaces
+                .spaces_for_output(&output)
+                .enumerate()
+                .map(|(i, space)| {
+                    crate::shell::grabs::menu::WorkspaceMenuEntry {
+                        handle: space.handle,
+                        label: space
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| format!("{}", i + 1)),
+                        is_current: false,
+                    }
+                })
+                .collect::<Vec<_>>();
             (
                 global_position,
-                items_for_element(mapped, false, true, false, ResizeEdge::all()),
+                items_for_element(
+                    mapped,
+                    false,
+                    true,
+                    false,
+                    ResizeEdge::all(),
+                    ws_entries,
+                ),
             )
         } else if let Some((workspace, output)) = self.workspace_for_surface(surface) {
             let workspace = self.workspaces.space_for_handle(&workspace).unwrap();
@@ -3800,9 +3926,35 @@ impl Shell {
                     ResizeEdge::all()
                 };
 
+                // Label each workspace on this output; flag the one
+                // the window currently lives on so the menu shows it
+                // disabled ("you're already there").
+                let current_handle = workspace.handle;
+                let ws_entries = self
+                    .workspaces
+                    .spaces_for_output(&output)
+                    .enumerate()
+                    .map(|(i, space)| {
+                        crate::shell::grabs::menu::WorkspaceMenuEntry {
+                            handle: space.handle,
+                            label: space
+                                .id
+                                .clone()
+                                .unwrap_or_else(|| format!("{}", i + 1)),
+                            is_current: space.handle == current_handle,
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 (
                     global_position,
-                    items_for_element(mapped, is_tiled, false, workspace.tiling_enabled, edge),
+                    items_for_element(
+                        mapped,
+                        is_tiled,
+                        false,
+                        workspace.tiling_enabled,
+                        edge,
+                        ws_entries,
+                    ),
                 )
             }
         } else {
@@ -3821,7 +3973,27 @@ impl Shell {
                 &items_to_protocol(&items),
             ) {
                 let shell_focus = find_shell_focus(self, shell_overlay_state, dh);
-                pending_callbacks.insert(menu_id, items.clone());
+                // Callback Vec must be in the same DFS order as the
+                // protocol stream so `context_menu_activate(index)` resolves
+                // to the right `Item::Entry::on_press` closure, even when
+                // submenus nest arbitrarily deep.
+                let flat = crate::shell::grabs::menu::flatten_callbacks(&items);
+                tracing::info!(
+                    "menu_request: menu_id={menu_id} flat callbacks ({} items):",
+                    flat.len()
+                );
+                for (i, it) in flat.iter().enumerate() {
+                    match it {
+                        Item::Entry { title, action, disabled, .. } => tracing::info!(
+                            "  [{i}] Entry title={title:?} action={action:?} disabled={disabled}"
+                        ),
+                        Item::Submenu { title, .. } => {
+                            tracing::info!("  [{i}] Submenu title={title:?}")
+                        }
+                        Item::Separator => tracing::info!("  [{i}] Separator"),
+                    }
+                }
+                pending_callbacks.insert(menu_id, flat);
                 (Some(menu_id), shell_focus)
             } else {
                 // No shell client connected - fall back to Iced rendering.

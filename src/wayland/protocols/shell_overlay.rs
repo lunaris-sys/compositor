@@ -98,7 +98,10 @@ impl ShellOverlayState {
 
     /// Send a context menu sequence to all connected shell clients.
     ///
-    /// Sends `context_menu_begin`, one event per item, then `context_menu_done`.
+    /// Sends `context_menu_begin`, one event per item (DFS order for submenus),
+    /// then `context_menu_done`. Each item receives a flat index; submenu
+    /// children carry their parent's flat index in `parent_index`.
+    /// Top-level items carry `u32::MAX` as `parent_index`.
     ///
     /// Returns the `menu_id` assigned to this menu, or `None` if no shell
     /// client is currently connected.
@@ -117,31 +120,8 @@ impl ShellOverlayState {
 
         for instance in &self.instances {
             instance.context_menu_begin(menu_id, x, y);
-
-            for (index, item) in items.iter().enumerate() {
-                match item {
-                    ContextMenuItem::Separator => {
-                        instance.context_menu_separator(menu_id, index as u32);
-                    }
-                    ContextMenuItem::Entry {
-                        action,
-                        toggled,
-                        disabled,
-                        shortcut,
-                    } => {
-                        instance.context_menu_item(
-                            menu_id,
-                            index as u32,
-                            lunaris_shell_overlay_v1::WindowAction::try_from(*action as u32)
-                                .unwrap(),
-                            *toggled as u32,
-                            *disabled as u32,
-                            shortcut.clone().unwrap_or_default(),
-                        );
-                    }
-                }
-            }
-
+            let mut counter: u32 = 0;
+            send_items_recursive(instance, menu_id, items, u32::MAX, &mut counter);
             instance.context_menu_done(menu_id);
         }
 
@@ -155,6 +135,67 @@ impl ShellOverlayState {
     pub fn close_context_menu(&self, menu_id: u32) {
         for instance in &self.instances {
             instance.context_menu_closed(menu_id);
+        }
+    }
+}
+
+/// Recursively serialize a menu tree to a single shell instance in DFS order.
+///
+/// `counter` tracks the next flat index to assign. `parent_index` is the flat
+/// index of the submenu header this level belongs to, or `u32::MAX` at the
+/// top level.
+fn send_items_recursive(
+    instance: &LunarisShellOverlayV1,
+    menu_id: u32,
+    items: &[ContextMenuItem],
+    parent_index: u32,
+    counter: &mut u32,
+) {
+    for item in items {
+        let my_index = *counter;
+        *counter += 1;
+        match item {
+            ContextMenuItem::Separator => {
+                instance.context_menu_separator(menu_id, my_index, parent_index);
+            }
+            ContextMenuItem::Entry {
+                action,
+                toggled,
+                disabled,
+                shortcut,
+                label,
+            } => {
+                instance.context_menu_item(
+                    menu_id,
+                    my_index,
+                    lunaris_shell_overlay_v1::WindowAction::try_from(*action as u32)
+                        .unwrap_or(lunaris_shell_overlay_v1::WindowAction::None),
+                    *toggled as u32,
+                    *disabled as u32,
+                    shortcut.clone().unwrap_or_default(),
+                    parent_index,
+                    label.clone().unwrap_or_default(),
+                    0,
+                );
+            }
+            ContextMenuItem::Submenu {
+                label,
+                disabled,
+                items: children,
+            } => {
+                instance.context_menu_item(
+                    menu_id,
+                    my_index,
+                    lunaris_shell_overlay_v1::WindowAction::None,
+                    0,
+                    *disabled as u32,
+                    String::new(),
+                    parent_index,
+                    label.clone(),
+                    1,
+                );
+                send_items_recursive(instance, menu_id, children, my_index, counter);
+            }
         }
     }
 }
@@ -377,6 +418,9 @@ impl ShellOverlayState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum WindowAction {
+    /// No action. Used as a placeholder for submenu headers that do not
+    /// themselves activate anything.
+    None = 0,
     /// Minimize the window.
     Minimize = 1,
     /// Toggle maximize.
@@ -420,6 +464,7 @@ impl TryFrom<u32> for WindowAction {
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
+            0 => Ok(Self::None),
             1 => Ok(Self::Minimize),
             2 => Ok(Self::Maximize),
             3 => Ok(Self::Fullscreen),
@@ -458,6 +503,24 @@ pub enum ContextMenuItem {
         disabled: bool,
         /// Optional keyboard shortcut label shown alongside the item.
         shortcut: Option<String>,
+        /// Optional custom display label. When `None` or empty the shell
+        /// derives a label from `action`. Needed for entries where the
+        /// `action` alone doesn't convey the right text (e.g. a
+        /// workspace-picker submenu where all children share the same
+        /// `MoveNextWorkspace` action but differ in their label).
+        label: Option<String>,
+    },
+    /// A submenu header with a fixed display label and its own child items.
+    ///
+    /// Activating the header does nothing; the shell shows a fly-out with
+    /// the children when the user hovers or clicks the header row.
+    Submenu {
+        /// Display label rendered in the parent menu's row.
+        label: String,
+        /// Whether the submenu itself is disabled (no children selectable).
+        disabled: bool,
+        /// Items inside the submenu, serialized recursively.
+        items: Vec<ContextMenuItem>,
     },
 }
 
@@ -627,7 +690,7 @@ mod tests {
 
     #[test]
     fn window_action_roundtrip() {
-        for value in 1u32..=18 {
+        for value in 0u32..=18 {
             let action = WindowAction::try_from(value).expect("value in range should parse");
             assert_eq!(action as u32, value, "roundtrip failed for value {value}");
         }
@@ -635,7 +698,6 @@ mod tests {
 
     #[test]
     fn window_action_invalid_returns_err() {
-        assert!(WindowAction::try_from(0).is_err());
         assert!(WindowAction::try_from(19).is_err());
         assert!(WindowAction::try_from(u32::MAX).is_err());
     }

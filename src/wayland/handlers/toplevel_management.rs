@@ -33,6 +33,10 @@ impl ToplevelManagementHandler for State {
         window: &<Self as ToplevelInfoHandler>::Window,
         seat: Option<Seat<Self>>,
     ) {
+        tracing::info!(
+            "toplevel_management::activate: app_id={} from wayland client",
+            window.app_id()
+        );
         self.unminimize(dh, window);
 
         let mut shell = self.common.shell.write();

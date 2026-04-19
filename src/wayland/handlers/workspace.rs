@@ -22,6 +22,10 @@ impl WorkspaceHandler for State {
         for request in requests.into_iter() {
             match request {
                 Request::Activate(handle) => {
+                    tracing::info!(
+                        "workspace::Request::Activate received handle={handle:?} \
+                         from wayland client"
+                    );
                     let mut shell = self.common.shell.write();
                     let maybe = shell.workspaces.iter().find_map(|(o, set)| {
                         set.workspaces
@@ -31,6 +35,11 @@ impl WorkspaceHandler for State {
                     });
 
                     if let Some((output, idx)) = maybe {
+                        tracing::info!(
+                            "workspace::Request::Activate dispatching activate \
+                             output={} idx={idx}",
+                            output.name()
+                        );
                         let _ = shell.activate(
                             &output,
                             idx,
@@ -38,6 +47,10 @@ impl WorkspaceHandler for State {
                             &mut self.common.workspace_state.update(),
                         );
                         // TODO: move cursor?
+                    } else {
+                        tracing::warn!(
+                            "workspace::Request::Activate: no matching workspace for {handle:?}"
+                        );
                     }
                 }
                 Request::SetTilingState { workspace, state } => {

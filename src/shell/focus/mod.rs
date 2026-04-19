@@ -226,6 +226,19 @@ impl Shell {
             old_app_id, app_id, update_cursor,
         );
         state.common.event_bus.emit_window_focused(&app_id);
+        // Keep the dynamic keybinding resolver in sync so
+        // `app_focused` D-Bus bindings fire for the newly focused app.
+        // Sentinel values produced by non-Element targets (`"none"`,
+        // `"fullscreen:..."`, `"group"`, `"popup"`, `"lock"`, `"layer"`)
+        // are not real app ids and must not be fed to the resolver.
+        let resolver_app_id = match target {
+            Some(KeyboardFocusTarget::Element(_)) => Some(app_id.clone()),
+            _ => None,
+        };
+        state
+            .common
+            .binding_resolver
+            .set_focused_app(resolver_app_id);
         update_focus_state(seat, target, state, serial, update_cursor);
 
         state.common.shell.write().update_active();

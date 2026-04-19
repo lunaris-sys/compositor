@@ -9,6 +9,9 @@ use crate::{
     },
     config::{CompOutputConfig, Config, ScreenFilter},
     dbus::a11y_keyboard_monitor::A11yKeyboardMonitorState,
+    dbus::app_interface::AppRegistryState,
+    dbus::input_manager::InputManagerState,
+    input::binding_resolver::BindingResolver,
     input::{PointerFocusState, gestures::GestureState},
     shell::{CosmicSurface, SeatExt, Shell, grabs::SeatMoveGrabState},
     utils::prelude::OutputExt,
@@ -293,6 +296,18 @@ pub struct Common {
     pub pending_menu_callbacks: HashMap<u32, Vec<crate::shell::grabs::menu::Item>>,
     pub a11y_state: A11yState,
     pub a11y_keyboard_monitor_state: A11yKeyboardMonitorState,
+    /// Registration table backing the `org.lunaris.App1` D-Bus
+    /// service. Shared with `input_manager_state` so focused-scope
+    /// keybinding registrations can be validated against the
+    /// registration.
+    pub app_registry_state: AppRegistryState,
+    /// Dynamic keybinding registry backing the
+    /// `org.lunaris.InputManager1` D-Bus service. Shared with
+    /// `binding_resolver` — do not duplicate.
+    pub input_manager_state: InputManagerState,
+    /// Resolver merging static TOML bindings with dynamic D-Bus ones.
+    /// Consulted by the input dispatcher on every keypress.
+    pub binding_resolver: BindingResolver,
 
     // shell-related wayland state
     pub xdg_shell_state: XdgShellState,
@@ -752,6 +767,39 @@ impl State {
 
         let a11y_keyboard_monitor_state = A11yKeyboardMonitorState::new(&async_executor);
 
+        // Start the org.lunaris.InputManager1 D-Bus service and seed the
+        // resolver with the bindings currently declared in TOML. The
+        // resolver shares its dynamic store with the service so
+        // registrations become visible to dispatch without copying.
+        // App registry first: InputManager needs a handle to it for
+        // app_focused scope validation.
+        let app_registry_state = AppRegistryState::new(&async_executor);
+        let input_manager_state =
+            InputManagerState::new(&async_executor, app_registry_state.registry.clone());
+        let binding_resolver = BindingResolver::new(input_manager_state.bindings.clone());
+        {
+            use crate::input::binding_resolver::{BindingScope, StaticBinding};
+            let mut statics: Vec<StaticBinding> = config
+                .toml_keybindings
+                .iter()
+                .map(|kb| StaticBinding::from_toml(kb, BindingScope::User))
+                .collect();
+            // Module fragments from compositor.d/keybindings.d/*.toml
+            // are loaded at Module precedence (below User so user
+            // overrides win, above the dynamic D-Bus scope).
+            let fragment_dir = crate::config::keybinding_fragment_dir(&config.toml_path);
+            for entry in crate::config::load_keybinding_fragments(&fragment_dir) {
+                if let Some(b) = StaticBinding::from_accelerator(
+                    &entry.binding,
+                    entry.action,
+                    BindingScope::Module,
+                ) {
+                    statics.push(b);
+                }
+            }
+            binding_resolver.set_static_bindings(statics);
+        }
+
         State {
             common: Common {
                 config,
@@ -816,6 +864,9 @@ impl State {
                 workspace_state,
                 a11y_state,
                 a11y_keyboard_monitor_state,
+                app_registry_state,
+                input_manager_state,
+                binding_resolver,
                 xwayland_scale: None,
                 xwayland_state: None,
                 xwayland_shell_state,

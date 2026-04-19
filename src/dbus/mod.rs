@@ -12,6 +12,8 @@ use tracing::{error, warn};
 use zbus::blocking::{Connection, fdo::DBusProxy};
 
 pub mod a11y_keyboard_monitor;
+pub mod app_interface;
+pub mod input_manager;
 #[cfg(feature = "systemd")]
 pub mod logind;
 mod name_owners;

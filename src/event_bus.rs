@@ -121,6 +121,31 @@ impl EventBusHandle {
             debug!(app_id, "emitted window.closed event");
         }
     }
+
+    /// Emit a `module.action_invoked` event when a keybinding bound via
+    /// a module manifest fires. The payload is empty for now — the type
+    /// string encodes the module id as `module.action_invoked.<id>` so
+    /// subscribers can filter by prefix, and the action id lives in the
+    /// `source` field to avoid allocating a new protobuf message for
+    /// this single case.
+    pub fn emit_module_action(&self, module_id: &str, action_id: &str) {
+        let event = Event {
+            id: uuid::Uuid::now_v7().to_string(),
+            r#type: format!("module.action_invoked.{module_id}"),
+            timestamp: timestamp_micros(),
+            source: action_id.to_string(),
+            pid: std::process::id(),
+            session_id: self.session_id.clone(),
+            payload: vec![],
+        };
+        if let Some(msg) = encode(event) {
+            self.try_send(msg);
+            debug!(
+                module_id,
+                action_id, "emitted module.action_invoked event"
+            );
+        }
+    }
 }
 
 pub fn spawn() -> EventBusHandle {

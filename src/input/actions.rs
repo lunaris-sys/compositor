@@ -28,6 +28,16 @@ use std::{os::unix::process::CommandExt, thread};
 
 use super::gestures;
 
+/// What the `KeyboardLayout*` private actions want to do. Internal to
+/// `input::actions`, so a plain enum instead of another `PrivateAction`
+/// variant.
+enum LayoutSwitch {
+    /// Direction: positive = next layout, negative = previous.
+    Cycle(i8),
+    /// Jump to 1-based index N.
+    Set(u8),
+}
+
 fn propagate_by_default(action: &shortcuts::Action) -> bool {
     matches!(
         action,
@@ -121,6 +131,129 @@ impl State {
                 self.common
                     .shell_overlay_state
                     .send_layout_mode_changed(new_mode as u32);
+            }
+
+            Action::Private(PrivateAction::ShellEvent(name)) => {
+                // Dispatch named shell-overlay events bound via the `shell:` TOML
+                // prefix. Only `waypointer_open` is wired into the protocol today;
+                // remaining names parse successfully so Settings can still list
+                // them, but emit a warning until the protocol is extended.
+                match name.as_str() {
+                    "waypointer_open" | "waypointer_toggle" => {
+                        self.common.shell_overlay_state.send_waypointer_open();
+                    }
+                    other => {
+                        warn!(
+                            event = other,
+                            "shell: event has no compositor binding yet; ignoring"
+                        );
+                    }
+                }
+            }
+
+            Action::Private(PrivateAction::ModuleAction {
+                module_id,
+                action_id,
+            }) => {
+                // Modules declare keybindings via their manifest; installd
+                // writes a fragment that maps the accelerator to
+                // `module:<id>:<action>`. Delivery to the running module is
+                // an Event Bus broadcast so the module does not need to be
+                // already connected to the compositor — it subscribes to
+                // its own events and filters by `module_id`.
+                tracing::info!(
+                    module = module_id,
+                    action = action_id,
+                    "module action fired"
+                );
+                self.common
+                    .event_bus
+                    .emit_module_action(&module_id, &action_id);
+            }
+
+            Action::Private(PrivateAction::KeyboardLayoutCycle(dir)) => {
+                self.switch_keyboard_layout(seat, LayoutSwitch::Cycle(dir));
+            }
+            Action::Private(PrivateAction::KeyboardLayoutSet(n)) => {
+                self.switch_keyboard_layout(seat, LayoutSwitch::Set(n));
+            }
+        }
+    }
+
+    /// Rotate or set the primary XKB layout by rewriting
+    /// `cosmic_conf.xkb_config` and re-applying it on the seat's
+    /// keyboard. Layouts are stored as a comma-separated string
+    /// (`"de,us"`) plus a parallel variant list, mirroring XKB's own
+    /// data model. A no-op when fewer than two layouts are loaded.
+    fn switch_keyboard_layout(&mut self, seat: &Seat<State>, sw: LayoutSwitch) {
+        let mut layouts: Vec<String> = self
+            .common
+            .config
+            .cosmic_conf
+            .xkb_config
+            .layout
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if layouts.len() < 2 {
+            warn!("keyboard_layout switch ignored: only {} layout(s) loaded", layouts.len());
+            return;
+        }
+        let mut variants: Vec<String> = self
+            .common
+            .config
+            .cosmic_conf
+            .xkb_config
+            .variant
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        // Pad variants to match layouts length so rotations keep them
+        // paired. `split` on an empty string yields `[""]`, which is
+        // exactly the padding we want if the user never set variants.
+        while variants.len() < layouts.len() {
+            variants.push(String::new());
+        }
+        variants.truncate(layouts.len());
+
+        match sw {
+            LayoutSwitch::Cycle(dir) if dir > 0 => {
+                layouts.rotate_left(1);
+                variants.rotate_left(1);
+            }
+            LayoutSwitch::Cycle(_) => {
+                layouts.rotate_right(1);
+                variants.rotate_right(1);
+            }
+            LayoutSwitch::Set(n) => {
+                let idx = (n as usize).saturating_sub(1);
+                if idx >= layouts.len() {
+                    warn!(
+                        "keyboard_layout:{} out of range (have {} layouts)",
+                        n,
+                        layouts.len()
+                    );
+                    return;
+                }
+                layouts.rotate_left(idx);
+                variants.rotate_left(idx);
+            }
+        }
+
+        let new_layout = layouts.join(",");
+        let new_variant = variants.join(",");
+        self.common.config.cosmic_conf.xkb_config.layout = new_layout.clone();
+        self.common.config.cosmic_conf.xkb_config.variant = new_variant;
+
+        let value = self.common.config.cosmic_conf.xkb_config.clone();
+        if let Some(keyboard) = seat.get_keyboard() {
+            if let Err(err) =
+                keyboard.set_xkb_config(self, crate::config::xkb_config_to_wl(&value))
+            {
+                warn!(?err, "failed to apply rotated xkb layout");
+            } else {
+                tracing::info!("xkb layout switched: primary now {:?}", layouts.first());
             }
         }
     }

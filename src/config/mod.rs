@@ -47,7 +47,10 @@ mod types;
 pub use cosmic_comp_config::EdidProduct;
 use cosmic_comp_config::{
     CosmicCompConfig, XkbConfig,
-    input::{DeviceState as InputDeviceState, InputConfig, TouchpadOverride},
+    input::{
+        AccelConfig, DeviceState as InputDeviceState, InputConfig, ScrollConfig, TapConfig,
+        TouchpadOverride,
+    },
     output::comp::{
         OutputConfig, OutputInfo, OutputState, OutputsConfig, TransformDef, load_outputs,
     },
@@ -271,7 +274,10 @@ pub struct KeyBindingModifiers {
 }
 
 /// Parse a keybinding string like "Super+Shift+H" into modifiers + key.
-fn parse_keybinding(binding: &str) -> Option<(KeyBindingModifiers, String)> {
+///
+/// Exposed so the dynamic binding resolver can re-use the same grammar
+/// for D-Bus-registered bindings without duplicating parsing logic.
+pub fn parse_keybinding(binding: &str) -> Option<(KeyBindingModifiers, String)> {
     let mut mods = KeyBindingModifiers::default();
     let parts: Vec<&str> = binding.split('+').collect();
     if parts.is_empty() {
@@ -292,6 +298,92 @@ fn parse_keybinding(binding: &str) -> Option<(KeyBindingModifiers, String)> {
 
 /// Default TOML config path.
 const DEFAULT_TOML_PATH: &str = ".config/lunaris/compositor.toml";
+
+/// Drop-in directory for keybinding fragments written by `installd`
+/// on module install. One `*.toml` file per module, each a flat
+/// `[keybindings]` table. Loaded alongside the main compositor.toml
+/// and fed into the binding resolver at `BindingScope::Module`.
+const KEYBINDINGS_FRAGMENT_DIR: &str = "compositor.d/keybindings.d";
+
+/// Return the absolute path of the keybinding fragment directory for
+/// the given main `compositor.toml` path.
+pub fn keybinding_fragment_dir(toml_path: &std::path::Path) -> std::path::PathBuf {
+    toml_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(KEYBINDINGS_FRAGMENT_DIR)
+}
+
+/// Parsed entry from a keybinding fragment file. `module_id` is the
+/// file stem, so two modules can never collide (fs atomicity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentEntry {
+    pub module_id: String,
+    pub binding: String,
+    pub action: String,
+}
+
+/// Scan `dir` and return every `"accelerator" = "action"` pair from
+/// every `*.toml` file. Missing / malformed files are skipped with a
+/// warning — a broken fragment must not crash the compositor.
+pub fn load_keybinding_fragments(dir: &std::path::Path) -> Vec<FragmentEntry> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::warn!(
+                "keybinding fragments: cannot read {}: {err}",
+                dir.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            continue;
+        }
+        let module_id = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::warn!("keybinding fragments: read {} failed: {err}", path.display());
+                continue;
+            }
+        };
+        let table: toml::Table = match toml::from_str(&content) {
+            Ok(t) => t,
+            Err(err) => {
+                tracing::warn!("keybinding fragments: parse {} failed: {err}", path.display());
+                continue;
+            }
+        };
+        let Some(kb_table) = table.get("keybindings").and_then(|v| v.as_table()) else {
+            continue;
+        };
+        for (binding, action) in kb_table {
+            let Some(action_str) = action.as_str() else { continue };
+            out.push(FragmentEntry {
+                module_id: module_id.clone(),
+                binding: binding.clone(),
+                action: action_str.to_string(),
+            });
+        }
+    }
+    tracing::info!(
+        "keybinding fragments: loaded {} binding(s) from {}",
+        out.len(),
+        dir.display(),
+    );
+    out
+}
 
 /// Load CosmicCompConfig from a TOML file, falling back to defaults.
 ///
@@ -334,14 +426,40 @@ fn load_toml_config(path: &std::path::Path) -> TomlConfig {
     let mut config = CosmicCompConfig::default();
 
     // Apply xkb_config overrides.
+    //
+    // XKB natively accepts comma-separated layouts and variants in a
+    // single string (`"de,us"` + options like `grp:alt_shift_toggle`).
+    // We let users write the friendlier TOML `layouts = ["de", "us"]`
+    // form too, and fold both into the upstream single-string field
+    // `cosmic_comp_config::XkbConfig::layout`. Single-scalar `layout =
+    // "de"` keeps working for back-compat; the array form wins when
+    // both are present.
     if let Some(xkb) = table.get("xkb_config").and_then(|v| v.as_table()) {
-        if let Some(s) = xkb.get("layout").and_then(|v| v.as_str()) {
+        if let Some(list) = xkb.get("layouts").and_then(|v| v.as_array()) {
+            let joined = list
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !joined.is_empty() {
+                config.xkb_config.layout = joined;
+            }
+        } else if let Some(s) = xkb.get("layout").and_then(|v| v.as_str()) {
             config.xkb_config.layout = s.to_string();
         }
         if let Some(s) = xkb.get("model").and_then(|v| v.as_str()) {
             config.xkb_config.model = s.to_string();
         }
-        if let Some(s) = xkb.get("variant").and_then(|v| v.as_str()) {
+        if let Some(list) = xkb.get("variants").and_then(|v| v.as_array()) {
+            let joined = list
+                .iter()
+                .map(|v| v.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(",");
+            // Trailing empty entries (e.g. `["","dvorak"]` → `",dvorak"`)
+            // are legitimate — XKB uses position to pair with layouts.
+            config.xkb_config.variant = joined;
+        } else if let Some(s) = xkb.get("variant").and_then(|v| v.as_str()) {
             config.xkb_config.variant = s.to_string();
         }
         if let Some(s) = xkb.get("options").and_then(|v| v.as_str()) {
@@ -366,6 +484,11 @@ fn load_toml_config(path: &std::path::Path) -> TomlConfig {
             };
         }
     }
+
+    // Apply mouse overrides (maps to cosmic_conf.input_default).
+    parse_mouse_config(&table, &mut config.input_default);
+    // Apply touchpad overrides (maps to cosmic_conf.input_touchpad).
+    parse_touchpad_config(&table, &mut config.input_touchpad);
 
     tracing::info!(
         "loaded compositor config from {} (xkb layout={:?})",
@@ -447,10 +570,160 @@ fn parse_layout_config(table: &toml::Table) -> LayoutConfig {
     layout
 }
 
+/// Apply `[mouse]` TOML overrides onto the compositor's default pointer config.
+///
+/// Missing fields leave the current value untouched. An empty or absent
+/// `[mouse]` section is a no-op. Values are clamped to libinput's accepted
+/// range (acceleration speed -1.0..=1.0).
+fn parse_mouse_config(table: &toml::Table, input: &mut InputConfig) {
+    let Some(section) = table.get("mouse").and_then(|v| v.as_table()) else {
+        return;
+    };
+
+    if let Some(f) = section.get("acceleration").and_then(|v| v.as_float()) {
+        let speed = f.clamp(-1.0, 1.0);
+        let mut accel = input.acceleration.clone().unwrap_or(AccelConfig {
+            profile: None,
+            speed,
+        });
+        accel.speed = speed;
+        input.acceleration = Some(accel);
+    }
+    if let Some(b) = section.get("natural_scroll").and_then(|v| v.as_bool()) {
+        let mut scroll = input.scroll_config.clone().unwrap_or(ScrollConfig {
+            method: None,
+            natural_scroll: None,
+            scroll_button: None,
+            scroll_factor: None,
+        });
+        scroll.natural_scroll = Some(b);
+        input.scroll_config = Some(scroll);
+    }
+    if let Some(b) = section.get("left_handed").and_then(|v| v.as_bool()) {
+        input.left_handed = Some(b);
+    }
+    // `scroll_speed` maps to libinput's `scroll_factor`: a linear
+    // multiplier on the per-axis scroll delta. The sensible range is
+    // roughly 0.1..3.0 — clamp there so an over-enthusiastic TOML
+    // edit doesn't send the page flying on every tick.
+    if let Some(f) = section.get("scroll_speed").and_then(|v| v.as_float()) {
+        let factor = f.clamp(0.1, 3.0);
+        let mut scroll = input.scroll_config.clone().unwrap_or(ScrollConfig {
+            method: None,
+            natural_scroll: None,
+            scroll_button: None,
+            scroll_factor: None,
+        });
+        scroll.scroll_factor = Some(factor);
+        input.scroll_config = Some(scroll);
+    }
+
+    tracing::info!(
+        "mouse config: accel={:?} natural_scroll={:?} left_handed={:?} scroll_factor={:?}",
+        input.acceleration.as_ref().map(|a| a.speed),
+        input.scroll_config.as_ref().and_then(|s| s.natural_scroll),
+        input.left_handed,
+        input.scroll_config.as_ref().and_then(|s| s.scroll_factor),
+    );
+}
+
+/// Apply `[touchpad]` TOML overrides onto the compositor's default touchpad config.
+fn parse_touchpad_config(table: &toml::Table, input: &mut InputConfig) {
+    let Some(section) = table.get("touchpad").and_then(|v| v.as_table()) else {
+        return;
+    };
+
+    if let Some(b) = section.get("tap_to_click").and_then(|v| v.as_bool()) {
+        let mut tap = input.tap_config.clone().unwrap_or(TapConfig {
+            enabled: b,
+            button_map: None,
+            drag: true,
+            drag_lock: false,
+        });
+        tap.enabled = b;
+        input.tap_config = Some(tap);
+    }
+    if let Some(b) = section.get("natural_scroll").and_then(|v| v.as_bool()) {
+        let mut scroll = input.scroll_config.clone().unwrap_or(ScrollConfig {
+            method: None,
+            natural_scroll: None,
+            scroll_button: None,
+            scroll_factor: None,
+        });
+        scroll.natural_scroll = Some(b);
+        input.scroll_config = Some(scroll);
+    }
+    if let Some(b) = section.get("two_finger_scroll").and_then(|v| v.as_bool()) {
+        let mut scroll = input.scroll_config.clone().unwrap_or(ScrollConfig {
+            method: None,
+            natural_scroll: None,
+            scroll_button: None,
+            scroll_factor: None,
+        });
+        scroll.method = if b {
+            Some(ScrollMethod::TwoFinger)
+        } else {
+            Some(ScrollMethod::NoScroll)
+        };
+        input.scroll_config = Some(scroll);
+    }
+    if let Some(b) = section.get("disable_while_typing").and_then(|v| v.as_bool()) {
+        input.disable_while_typing = Some(b);
+    }
+    if let Some(f) = section.get("acceleration").and_then(|v| v.as_float()) {
+        let speed = f.clamp(-1.0, 1.0);
+        let mut accel = input.acceleration.clone().unwrap_or(AccelConfig {
+            profile: None,
+            speed,
+        });
+        accel.speed = speed;
+        input.acceleration = Some(accel);
+    }
+    // Click method: `"clickfinger"` (default) uses finger count to
+    // synthesise right/middle click; `"areas"` splits the bottom edge
+    // into three hit zones like a physical trackpad.
+    if let Some(s) = section.get("click_method").and_then(|v| v.as_str()) {
+        input.click_method = match s {
+            "areas" | "buttonareas" | "button_areas" => Some(ClickMethod::ButtonAreas),
+            "clickfinger" => Some(ClickMethod::Clickfinger),
+            other => {
+                tracing::warn!(
+                    "touchpad.click_method: unknown value {:?} (use 'clickfinger' or 'areas')",
+                    other
+                );
+                None
+            }
+        };
+    }
+    // `tap_drag` is part of the `TapConfig` struct that tap_to_click
+    // also populates, so we may have already created the config above.
+    if let Some(b) = section.get("tap_drag").and_then(|v| v.as_bool()) {
+        let mut tap = input.tap_config.clone().unwrap_or(TapConfig {
+            enabled: true,
+            button_map: None,
+            drag: b,
+            drag_lock: false,
+        });
+        tap.drag = b;
+        input.tap_config = Some(tap);
+    }
+
+    tracing::info!(
+        "touchpad config: tap={:?} natural_scroll={:?} dwt={:?} accel={:?} click_method={:?} tap_drag={:?}",
+        input.tap_config.as_ref().map(|t| t.enabled),
+        input.scroll_config.as_ref().and_then(|s| s.natural_scroll),
+        input.disable_while_typing,
+        input.acceleration.as_ref().map(|a| a.speed),
+        input.click_method,
+        input.tap_config.as_ref().map(|t| t.drag),
+    );
+}
+
 /// Default keybindings used when no `[keybindings]` section is present.
-fn default_keybindings() -> Vec<KeyBinding> {
+pub fn default_keybindings() -> Vec<KeyBinding> {
     let mut bindings = Vec::new();
     let defaults = [
+        // Window / focus / move
         ("Super+T", "toggle_tiling"),
         ("Super+Shift+Space", "toggle_window_floating"),
         ("Super+H", "focus_left"),
@@ -466,6 +739,29 @@ fn default_keybindings() -> Vec<KeyBinding> {
         ("Super+M", "toggle_monocle"),
         ("Super+Minus", "scratchpad_toggle"),
         ("Super+Shift+Minus", "scratchpad_move"),
+        // Workspace switch (Super+1..9)
+        ("Super+1", "workspace_switch:1"),
+        ("Super+2", "workspace_switch:2"),
+        ("Super+3", "workspace_switch:3"),
+        ("Super+4", "workspace_switch:4"),
+        ("Super+5", "workspace_switch:5"),
+        ("Super+6", "workspace_switch:6"),
+        ("Super+7", "workspace_switch:7"),
+        ("Super+8", "workspace_switch:8"),
+        ("Super+9", "workspace_switch:9"),
+        // Workspace move (Super+Shift+1..9)
+        ("Super+Shift+1", "workspace_move:1"),
+        ("Super+Shift+2", "workspace_move:2"),
+        ("Super+Shift+3", "workspace_move:3"),
+        ("Super+Shift+4", "workspace_move:4"),
+        ("Super+Shift+5", "workspace_move:5"),
+        ("Super+Shift+6", "workspace_move:6"),
+        ("Super+Shift+7", "workspace_move:7"),
+        ("Super+Shift+8", "workspace_move:8"),
+        ("Super+Shift+9", "workspace_move:9"),
+        // App launchers and shell
+        ("Super+Return", "spawn:foot"),
+        ("Super+Space", "shell:waypointer_open"),
     ];
     for (key_str, action) in defaults {
         if let Some((modifiers, key)) = parse_keybinding(key_str) {
@@ -560,6 +856,28 @@ impl Config {
                 watcher
                     .watch(parent, notify::RecursiveMode::NonRecursive)
                     .expect("failed to watch config directory");
+            }
+
+            // Also watch the keybinding fragment directory so module
+            // installs / uninstalls propagate without restarting the
+            // compositor. Best-effort: if the directory does not exist
+            // yet (no module has been installed), skip — `installd`
+            // creates it on the first write and the next reload picks
+            // it up.
+            {
+                let fragment_dir = keybinding_fragment_dir(&watch_path);
+                if fragment_dir.exists() {
+                    use notify::Watcher;
+                    if let Err(err) = watcher.watch(
+                        &fragment_dir,
+                        notify::RecursiveMode::NonRecursive,
+                    ) {
+                        tracing::warn!(
+                            "could not watch keybinding fragment dir {}: {err}",
+                            fragment_dir.display()
+                        );
+                    }
+                }
             }
 
             let toml_path_for_handler = watch_path;
@@ -1257,6 +1575,34 @@ fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
     state.common.config.layout = toml.layout;
     state.common.config.toml_keybindings = toml.keybindings;
 
+    // Refresh the dynamic binding resolver's static snapshot so
+    // D-Bus-registered bindings continue to see the right static
+    // precedence after a hot-reload. Fragments from
+    // compositor.d/keybindings.d/ are reloaded here too so module
+    // install / uninstall takes effect without restarting the
+    // compositor.
+    {
+        use crate::input::binding_resolver::{BindingScope, StaticBinding};
+        let mut statics: Vec<StaticBinding> = state
+            .common
+            .config
+            .toml_keybindings
+            .iter()
+            .map(|kb| StaticBinding::from_toml(kb, BindingScope::User))
+            .collect();
+        let fragment_dir = keybinding_fragment_dir(toml_path);
+        for entry in load_keybinding_fragments(&fragment_dir) {
+            if let Some(b) = StaticBinding::from_accelerator(
+                &entry.binding,
+                entry.action,
+                BindingScope::Module,
+            ) {
+                statics.push(b);
+            }
+        }
+        state.common.binding_resolver.set_static_bindings(statics);
+    }
+
     // Propagate gap settings and window rules to the shell.
     {
         let layout = &state.common.config.layout;
@@ -1561,5 +1907,75 @@ action = "float"
         };
         assert!(match_dialog.matches("any", "any", true));
         assert!(!match_dialog.matches("any", "any", false));
+    }
+
+    // ── Keybinding fragments ───────────────────────────────────────────
+
+    #[test]
+    fn load_keybinding_fragments_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragments = load_keybinding_fragments(dir.path());
+        assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn load_keybinding_fragments_missing_dir_is_ok() {
+        let dir = std::env::temp_dir().join("lunaris-does-not-exist-xyz");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(load_keybinding_fragments(&dir).is_empty());
+    }
+
+    #[test]
+    fn load_keybinding_fragments_reads_all_tomls() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("com.example.a.toml"),
+            "[keybindings]\n\"Super+A\" = \"module:com.example.a:open\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("com.example.b.toml"),
+            "[keybindings]\n\"Super+B\" = \"module:com.example.b:activate\"\n\
+             \"Ctrl+B\" = \"module:com.example.b:secondary\"\n",
+        )
+        .unwrap();
+        // Non-TOML must be ignored.
+        std::fs::write(dir.path().join("README.md"), "ignore me").unwrap();
+
+        let mut fragments = load_keybinding_fragments(dir.path());
+        fragments.sort_by(|a, b| a.binding.cmp(&b.binding));
+        assert_eq!(fragments.len(), 3);
+        assert!(fragments
+            .iter()
+            .any(|e| e.binding == "Super+A" && e.module_id == "com.example.a"));
+        assert!(fragments
+            .iter()
+            .filter(|e| e.module_id == "com.example.b")
+            .count()
+            == 2);
+    }
+
+    #[test]
+    fn load_keybinding_fragments_skips_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("broken.toml"), "not valid toml = = =").unwrap();
+        std::fs::write(
+            dir.path().join("ok.toml"),
+            "[keybindings]\n\"Super+X\" = \"module:ok:x\"\n",
+        )
+        .unwrap();
+        let fragments = load_keybinding_fragments(dir.path());
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].module_id, "ok");
+    }
+
+    #[test]
+    fn keybinding_fragment_dir_is_sibling_of_toml() {
+        let toml = std::path::Path::new("/etc/lunaris/compositor.toml");
+        let frag = keybinding_fragment_dir(toml);
+        assert_eq!(
+            frag,
+            std::path::Path::new("/etc/lunaris/compositor.d/keybindings.d")
+        );
     }
 }

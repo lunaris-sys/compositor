@@ -81,6 +81,7 @@ use std::{
 };
 
 pub mod actions;
+pub mod binding_resolver;
 pub mod gestures;
 
 /// Used for debouncing focus updates due to pointer motion, if after the focus change is
@@ -2053,6 +2054,70 @@ impl State {
                     description: None,
                 };
                 return FilterResult::Intercept(Some((action, binding)));
+            }
+        }
+
+        // Check dynamic D-Bus bindings registered via
+        // org.lunaris.InputManager1. Precedence: app_global fires
+        // regardless of focus; app_focused only fires when the focused
+        // toplevel's app_id matches the registration. Static TOML above
+        // always wins over dynamic — if we got here the user has not
+        // shadowed the dynamic binding.
+        if !shortcuts_inhibited && event.state() == KeyState::Pressed {
+            let current_mods = crate::config::KeyBindingModifiers {
+                super_key: modifiers.logo,
+                shift: modifiers.shift,
+                ctrl: modifiers.ctrl,
+                alt: modifiers.alt,
+            };
+            let focused = self.common.binding_resolver.focused_app_id();
+            let matched = {
+                let store = self.common.input_manager_state.bindings.lock().unwrap();
+                let scan = |wanted_scope: &str, focused_app: Option<&str>| {
+                    for entry in store.by_owner.values().flatten() {
+                        if entry.scope != wanted_scope {
+                            continue;
+                        }
+                        if let Some(app) = focused_app {
+                            if entry.app_id != app {
+                                continue;
+                            }
+                        }
+                        let Some((mods, key)) = crate::config::parse_keybinding(&entry.binding) else {
+                            continue;
+                        };
+                        if mods != current_mods {
+                            continue;
+                        }
+                        let Some(keysym) = crate::config::keysym_from_str(&key) else {
+                            continue;
+                        };
+                        if !key_matches(keysym) {
+                            continue;
+                        }
+                        return Some((
+                            entry.action.clone(),
+                            entry.binding.clone(),
+                            entry.owner.clone(),
+                        ));
+                    }
+                    None
+                };
+                scan("app_global", None)
+                    .or_else(|| focused.as_deref().and_then(|app| scan("app_focused", Some(app))))
+            };
+            if let Some((action, binding, owner)) = matched {
+                tracing::info!(
+                    "input_manager: MATCHED dynamic binding {:?} -> {:?}",
+                    binding,
+                    action
+                );
+                self.common
+                    .input_manager_state
+                    .emit_binding_invoked(&binding, &action, &owner);
+                seat.modifiers_shortcut_queue().clear();
+                seat.supressed_keys().add(&handle, None);
+                return FilterResult::Intercept(None);
             }
         }
 

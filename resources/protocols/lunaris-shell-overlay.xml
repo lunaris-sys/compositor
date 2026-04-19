@@ -359,6 +359,18 @@
       <arg name="surface_id" type="uint" summary="fullscreen surface identifier"/>
     </event>
 
+    <!-- ===== Workspace Overview ===== -->
+
+    <event name="workspace_overlay_open">
+      <description summary="open the Workspace Overview overlay">
+        Sent when the user requests the workspace overview by keyboard
+        (Super+Tab by default). The desktop-shell should open the
+        overlay with keyboard focus on the currently active window.
+        If the overlay is already open, the shell may use this event
+        to cycle keyboard focus to the next window.
+      </description>
+    </event>
+
     <!-- ===== Waypointer ===== -->
 
     <event name="waypointer_open">

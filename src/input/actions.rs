@@ -142,6 +142,15 @@ impl State {
                     "waypointer_open" | "waypointer_toggle" => {
                         self.common.shell_overlay_state.send_waypointer_open();
                     }
+                    "workspace_overlay_open" | "workspace_overlay_toggle" => {
+                        // The shell decides whether this opens fresh or
+                        // cycles focus to the next window — receiving
+                        // the same event twice is the explicit cycle
+                        // signal (see WorkspaceIndicator.svelte).
+                        self.common
+                            .shell_overlay_state
+                            .send_workspace_overlay_open();
+                    }
                     other => {
                         warn!(
                             event = other,

@@ -410,6 +410,17 @@ impl ShellOverlayState {
             instance.waypointer_open();
         }
     }
+
+    /// Notify connected shells to open the Workspace Overview overlay.
+    /// Sent on a keyboard request (e.g. Super+Tab). The shell uses this
+    /// to open the overlay AND grab keyboard focus for cycling. If the
+    /// overlay is already open, the shell treats subsequent events as
+    /// a "cycle to next window" hint.
+    pub fn send_workspace_overlay_open(&self) {
+        for instance in &self.instances {
+            instance.workspace_overlay_open();
+        }
+    }
 }
 
 // ===== Menu item types =====

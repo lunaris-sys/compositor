@@ -773,6 +773,7 @@ pub fn default_keybindings() -> Vec<KeyBinding> {
         // App launchers and shell
         ("Super+Return", "spawn:foot"),
         ("Super+Space", "shell:waypointer_open"),
+        ("Super+Tab", "shell:workspace_overlay_open"),
     ];
     for (key_str, action) in defaults {
         if let Some((modifiers, key)) = parse_keybinding(key_str) {

@@ -198,6 +198,14 @@ impl IndicatorShader {
             .clone()
     }
 
+    /// Intrinsic opacity of the focused-window border. Multiplied with
+    /// the per-call `alpha` so animations (fade-in, swap-transition,
+    /// minimize) still work. The value matches what a designer would
+    /// write as `rgba(255,255,255,0.13)` in CSS on a dark surface — a
+    /// light grey outline that's visible on contact with the window
+    /// but does not compete with content. Tweak in one place.
+    pub const FOCUS_BORDER_ALPHA: f32 = 0.13;
+
     pub fn focus_element<R: AsGlowRenderer>(
         renderer: &R,
         key: impl Into<Key>,
@@ -219,7 +227,7 @@ impl IndicatorShader {
             element_geo,
             thickness,
             outer_radius,
-            alpha,
+            alpha * Self::FOCUS_BORDER_ALPHA,
             scale,
             active_window_hint,
         )

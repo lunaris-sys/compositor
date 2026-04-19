@@ -206,17 +206,31 @@ pub fn apply_to_theme(theme: &mut lunaris_theme::LunarisTheme, cfg: &AppearanceC
 
     // Focus border color. Explicit user setting wins; otherwise follow
     // the user's `[overrides].accent` if they configured one; otherwise
-    // default to the mode-aware monochrome foreground (white on dark,
-    // black on light). Lunaris is monochrome-first — we do not fall
-    // through to the legacy Panda `accent` (near-black) because that
-    // makes the focus ring invisible on a dark shell surface, and we
-    // never silently inject a chromatic colour the user did not ask for.
+    // default to pure white on dark / pure black on light. The render
+    // pipeline multiplies by `IndicatorShader::FOCUS_BORDER_ALPHA`
+    // (currently 0.13) so the final pixel is `rgba(255,255,255,0.13)`
+    // on dark and `rgba(0,0,0,0.13)` on light — a subtle monochrome
+    // outline, never a saturated accent ring. Using the foreground
+    // tokens #fafafa/#171717 here would shift the math slightly (and
+    // make the light-mode border cast a dark-grey tint), so we pin to
+    // pure 0/1 channel values for the common case.
     let focused_rgb = if let Some(ref color) = w.border.focused {
         resolve_focused(color, cfg, theme)
     } else if cfg.overrides.accent.is_some() {
         Some(effective_accent(cfg, theme))
     } else {
-        Some(monochrome_for_mode(&cfg.theme))
+        let dark = cfg
+            .theme
+            .mode
+            .as_deref()
+            .or(cfg.theme.active.as_deref())
+            .unwrap_or("dark")
+            != "light";
+        Some(if dark {
+            [1.0, 1.0, 1.0]
+        } else {
+            [0.0, 0.0, 0.0]
+        })
     };
     match focused_rgb {
         Some(rgb) => {

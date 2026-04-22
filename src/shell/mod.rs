@@ -262,6 +262,27 @@ pub struct PendingWindow {
     pub maximized: bool,
 }
 
+/// Metadata captured at minimize-time, returned from
+/// `Shell::minimize_request` so callers can forward it to the event
+/// bus without having to re-resolve the window's identity after it's
+/// been moved into the minimized-windows list.
+#[derive(Debug, Clone)]
+pub struct MinimizedInfo {
+    pub window_id: String,
+    pub app_id: String,
+    pub title: String,
+    pub workspace_id: String,
+}
+
+/// Counterpart to `MinimizedInfo`, returned from `unminimize_request`.
+/// Only carries the identifiers needed for the `window.unminimized`
+/// event — title/workspace are not re-emitted on restore.
+#[derive(Debug, Clone)]
+pub struct UnminimizedInfo {
+    pub window_id: String,
+    pub app_id: String,
+}
+
 #[derive(Debug)]
 pub struct PendingLayer {
     pub surface: LayerSurface,
@@ -4644,7 +4665,16 @@ impl Shell {
         }
     }
 
-    pub fn minimize_request<S>(&mut self, surface: &S)
+    /// Minimize a window. Returns `Some((window_id, app_id, title,
+    /// workspace_id))` when a new minimize actually happened (so the
+    /// caller can emit a `window.minimized` event on the event bus).
+    /// Returns `None` when the call was a no-op (surface not found, or
+    /// already minimized on a sticky layer with no attached workspace).
+    ///
+    /// The return value is Option-wrapped rather than bool so callers
+    /// can emit the event without re-querying the surface's metadata
+    /// after it's been moved into the minimized-windows list.
+    pub fn minimize_request<S>(&mut self, surface: &S) -> Option<MinimizedInfo>
     where
         CosmicSurface: PartialEq<S>,
     {
@@ -4658,6 +4688,16 @@ impl Shell {
         }) {
             let to = minimize_rectangle(&set.output, &mapped.active_window());
             let geo = set.sticky_layer.unmap(&mapped, Some(to)).unwrap();
+            let active = mapped.active_window();
+            // window_id / workspace_id deferred: shell UI uses Wayland
+            // toplevel state (not event-bus) so analytics consumers
+            // (Knowledge Graph) only need app-level metadata for now.
+            let info = MinimizedInfo {
+                window_id: String::new(),
+                app_id: active.app_id(),
+                title: active.title(),
+                workspace_id: String::new(),
+            };
             set.minimized_windows.push(MinimizedWindow::Floating {
                 window: mapped.clone(),
                 previous: FloatingRestoreData {
@@ -4667,6 +4707,7 @@ impl Shell {
                     was_snapped: None,
                 },
             });
+            return Some(info);
         } else if let Some((workspace, window)) =
             self.workspaces.sets.values_mut().find_map(|set| {
                 set.workspaces.iter_mut().find_map(|workspace| {
@@ -4681,18 +4722,31 @@ impl Shell {
             })
         {
             let to = minimize_rectangle(workspace.output(), &window);
+            let info = MinimizedInfo {
+                window_id: String::new(),
+                app_id: window.app_id(),
+                title: window.title(),
+                workspace_id: String::new(),
+            };
             if let Some(minimized) = workspace.minimize(surface, to) {
                 workspace.minimized_windows.push(minimized);
+                return Some(info);
             }
         }
+        None
     }
 
+    /// Restore a minimized window. Returns `Some((window_id, app_id))`
+    /// when the restore actually happened so callers can emit a
+    /// `window.unminimized` event. Returns `None` if the surface wasn't
+    /// minimized to begin with.
     pub fn unminimize_request<S>(
         &mut self,
         surface: &S,
         seat: &Seat<State>,
         loop_handle: &LoopHandle<'static, State>,
-    ) where
+    ) -> Option<UnminimizedInfo>
+    where
         CosmicSurface: PartialEq<S>,
     {
         if let Some((set, window)) = self.workspaces.sets.values_mut().find_map(|set| {
@@ -4712,8 +4766,14 @@ impl Shell {
             if window.is_stack() {
                 window.set_active(surface);
             }
+            let active = window.active_window();
+            let info = UnminimizedInfo {
+                window_id: String::new(),
+                app_id: active.app_id(),
+            };
             set.sticky_layer
                 .remap_minimized(window, from, previous_position);
+            Some(info)
         } else {
             let Some((workspace, window)) = self.workspaces.spaces_mut().find_map(|w| {
                 w.minimized_windows
@@ -4722,18 +4782,24 @@ impl Shell {
                     .map(|i| w.minimized_windows.swap_remove(i))
                     .map(|window| (w, window))
             }) else {
-                return;
+                return None;
             };
 
             if window.mapped().is_some_and(|m| m.is_stack()) {
                 window.mapped().unwrap().set_active(surface);
             }
+            let active = window.active_window();
+            let info = UnminimizedInfo {
+                window_id: String::new(),
+                app_id: active.app_id(),
+            };
             let from = minimize_rectangle(workspace.output(), &window.active_window());
             if let Some((surface, restore, _)) = workspace.unminimize(window, from, seat) {
                 toplevel_leave_output(&surface, &workspace.output);
                 toplevel_leave_workspace(&surface, &workspace.handle);
                 self.remap_unfullscreened_window(surface, restore, loop_handle);
             }
+            Some(info)
         }
     }
 

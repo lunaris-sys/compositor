@@ -227,13 +227,28 @@ impl ToplevelManagementHandler for State {
 
     fn minimize(&mut self, _dh: &DisplayHandle, window: &<Self as ToplevelInfoHandler>::Window) {
         let mut shell = self.common.shell.write();
-        shell.minimize_request(window);
+        let info = shell.minimize_request(window);
+        drop(shell);
+        if let Some(info) = info {
+            self.common.event_bus.emit_window_minimized(
+                &info.window_id,
+                &info.app_id,
+                &info.title,
+                &info.workspace_id,
+            );
+        }
     }
 
     fn unminimize(&mut self, _dh: &DisplayHandle, window: &<Self as ToplevelInfoHandler>::Window) {
         let mut shell = self.common.shell.write();
         let seat = shell.seats.last_active().clone();
-        shell.unminimize_request(window, &seat, &self.common.event_loop_handle);
+        let info = shell.unminimize_request(window, &seat, &self.common.event_loop_handle);
+        drop(shell);
+        if let Some(info) = info {
+            self.common
+                .event_bus
+                .emit_window_unminimized(&info.window_id, &info.app_id);
+        }
     }
 
     fn set_sticky(&mut self, _dh: &DisplayHandle, window: &<Self as ToplevelInfoHandler>::Window) {

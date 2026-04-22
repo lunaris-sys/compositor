@@ -223,7 +223,15 @@ impl XdgShellHandler for State {
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         let mut shell = self.common.shell.write();
-        shell.minimize_request(surface.wl_surface())
+        if let Some(info) = shell.minimize_request(surface.wl_surface()) {
+            drop(shell);
+            self.common.event_bus.emit_window_minimized(
+                &info.window_id,
+                &info.app_id,
+                &info.title,
+                &info.workspace_id,
+            );
+        }
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
@@ -270,6 +278,9 @@ impl XdgShellHandler for State {
             Some(target) => {
                 std::mem::drop(shell);
                 Shell::set_focus(self, Some(&target), &seat, None, true);
+                // Notify the Event Bus so the notification daemon can
+                // queue incoming notifications while fullscreen is active.
+                self.common.event_bus.emit_window_fullscreen(true);
             }
             None => {
                 if let Some(pending) = shell.pending_windows.iter_mut().find(|pending| {
@@ -301,6 +312,9 @@ impl XdgShellHandler for State {
             if should_focus {
                 Shell::set_focus(self, Some(&target), &seat, None, true);
             }
+            // Notify the Event Bus so the notification daemon flushes
+            // its fullscreen queue (max 5 queued toasts replayed).
+            self.common.event_bus.emit_window_fullscreen(false);
         } else if let Some(pending) = shell
             .pending_windows
             .iter_mut()

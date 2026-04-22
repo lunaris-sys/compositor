@@ -1038,7 +1038,16 @@ impl State {
                     .current_focus()
                     .and_then(|f| f.active_window())
                 {
-                    shell.minimize_request(&focused_window);
+                    let info = shell.minimize_request(&focused_window);
+                    drop(shell);
+                    if let Some(info) = info {
+                        self.common.event_bus.emit_window_minimized(
+                            &info.window_id,
+                            &info.app_id,
+                            &info.title,
+                            &info.workspace_id,
+                        );
+                    }
                 }
             }
 

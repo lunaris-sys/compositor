@@ -59,6 +59,8 @@ impl EventBusHandle {
             pid: std::process::id(),
             session_id: self.session_id.clone(),
             payload: vec![],
+            uid: 0,
+            project_id: String::new(),
         };
         if let Some(msg) = encode(event) {
             self.try_send(msg);
@@ -76,6 +78,8 @@ impl EventBusHandle {
             pid: std::process::id(),
             session_id: self.session_id.clone(),
             payload: vec![],
+            uid: 0,
+            project_id: String::new(),
         };
         if let Some(msg) = encode(event) {
             self.try_send(msg);
@@ -95,6 +99,8 @@ impl EventBusHandle {
             pid: std::process::id(),
             session_id: self.session_id.clone(),
             payload: vec![],
+            uid: 0,
+            project_id: String::new(),
         };
         if let Some(msg) = encode(event) {
             self.try_send(msg);
@@ -115,10 +121,110 @@ impl EventBusHandle {
             pid: std::process::id(),
             session_id: self.session_id.clone(),
             payload: vec![],
+            uid: 0,
+            project_id: String::new(),
         };
         if let Some(msg) = encode(event) {
             self.try_send(msg);
             debug!(app_id, "emitted window.closed event");
+        }
+    }
+
+    /// Emit a `window.minimized` event with full payload.
+    ///
+    /// Consumed by the Knowledge Graph for analytics on minimize
+    /// patterns. The desktop-shell itself derives its minimized UI
+    /// from cosmic-toplevel-info state and does NOT subscribe to this
+    /// event — keeping the shell's window state on a single Wayland
+    /// source per the mix-sources rule in CLAUDE.md.
+    pub fn emit_window_minimized(
+        &self,
+        window_id: &str,
+        app_id: &str,
+        window_title: &str,
+        workspace_id: &str,
+    ) {
+        let payload = proto::WindowMinimizedPayload {
+            window_id: window_id.to_string(),
+            app_id: app_id.to_string(),
+            window_title: window_title.to_string(),
+            workspace_id: workspace_id.to_string(),
+        };
+        let event = Event {
+            id: uuid::Uuid::now_v7().to_string(),
+            r#type: "window.minimized".to_string(),
+            timestamp: timestamp_micros(),
+            source: "wayland".to_string(),
+            pid: std::process::id(),
+            session_id: self.session_id.clone(),
+            payload: payload.encode_to_vec(),
+            uid: 0,
+            project_id: String::new(),
+        };
+        if let Some(msg) = encode(event) {
+            self.try_send(msg);
+            debug!(window_id, app_id, "emitted window.minimized event");
+        }
+    }
+
+    /// Emit a `window.unminimized` event when a window is restored.
+    pub fn emit_window_unminimized(&self, window_id: &str, app_id: &str) {
+        let payload = proto::WindowUnminimizedPayload {
+            window_id: window_id.to_string(),
+            app_id: app_id.to_string(),
+        };
+        let event = Event {
+            id: uuid::Uuid::now_v7().to_string(),
+            r#type: "window.unminimized".to_string(),
+            timestamp: timestamp_micros(),
+            source: "wayland".to_string(),
+            pid: std::process::id(),
+            session_id: self.session_id.clone(),
+            payload: payload.encode_to_vec(),
+            uid: 0,
+            project_id: String::new(),
+        };
+        if let Some(msg) = encode(event) {
+            self.try_send(msg);
+            debug!(window_id, app_id, "emitted window.unminimized event");
+        }
+    }
+
+    /// Emit `window.fullscreen_entered` or `window.fullscreen_exited`.
+    ///
+    /// Consumed by the notification daemon to queue notifications
+    /// while a window is fullscreen (video / games) and flush them on
+    /// exit. The payload is empty — the daemon treats these as pure
+    /// state transitions and keeps its own "is anything fullscreen"
+    /// counter (no need to track per-window app_id).
+    ///
+    /// Currently called from the xdg-shell `fullscreen_request` /
+    /// `unfullscreen_request` handlers. Keybinding-initiated fullscreen
+    /// paths in `shell::Workspace::map_fullscreen` / `remove_fullscreen`
+    /// are NOT yet instrumented — wiring those requires plumbing an
+    /// `EventBusHandle` through the Workspace constructor. Until that
+    /// lands, client-initiated fullscreen (the dominant case: video
+    /// players, games, browser fullscreen) is fully covered.
+    pub fn emit_window_fullscreen(&self, entered: bool) {
+        let type_str = if entered {
+            "window.fullscreen_entered"
+        } else {
+            "window.fullscreen_exited"
+        };
+        let event = Event {
+            id: uuid::Uuid::now_v7().to_string(),
+            r#type: type_str.to_string(),
+            timestamp: timestamp_micros(),
+            source: "wayland".to_string(),
+            pid: std::process::id(),
+            session_id: self.session_id.clone(),
+            payload: vec![],
+            uid: 0,
+            project_id: String::new(),
+        };
+        if let Some(msg) = encode(event) {
+            self.try_send(msg);
+            debug!(entered, "emitted {type_str} event");
         }
     }
 
@@ -137,6 +243,8 @@ impl EventBusHandle {
             pid: std::process::id(),
             session_id: self.session_id.clone(),
             payload: vec![],
+            uid: 0,
+            project_id: String::new(),
         };
         if let Some(msg) = encode(event) {
             self.try_send(msg);

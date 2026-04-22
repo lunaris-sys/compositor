@@ -87,7 +87,7 @@ pub enum ReleaseMode {
 pub mod menu;
 pub use self::menu::*;
 mod moving;
-pub use self::moving::SeatMoveGrabState;
+pub use self::moving::{MoveGrabState, SeatMoveGrabState};
 mod delay;
 
 bitflags::bitflags! {
@@ -223,6 +223,14 @@ impl PointerGrab<State> for ResizeGrab {
             ResizeGrab::Floating(grab) => PointerGrab::motion(grab, data, handle, focus, event),
             ResizeGrab::Tiling(grab) => PointerGrab::motion(grab, data, handle, focus, event),
         }
+        // ATTACH-DEBUG: mirror the Move-grab synchronous header
+        // emit so resize-from-edge also keeps the Lunaris header
+        // on-beat (Feature 4: latency-sync). Full refresh here
+        // (not targeted) because the ResizeGrab enum doesn't
+        // expose the inner mapped window without an extra
+        // matching step, and resize events are less frequent than
+        // pointer motion anyway.
+        data.common.refresh_window_headers();
     }
 
     fn relative_motion(
@@ -507,6 +515,16 @@ impl MoveGrab {
             release,
             evlh,
         ))
+    }
+
+    /// Opaque surface id for the dragged window, used by callers to
+    /// synchronously emit `window_drag_start` before the first
+    /// pointer motion can fire (Feature 4 latency-sync).
+    pub fn drag_surface_id(&self) -> Option<u32> {
+        match self {
+            MoveGrab::Move(g) => g.drag_surface_id(),
+            MoveGrab::Delayed(_) => None,
+        }
     }
 
     pub fn delayed(

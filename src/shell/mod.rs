@@ -1512,6 +1512,11 @@ impl Common {
         let shell_ref = &mut *shell;
         shell_ref.active_hint = self.config.cosmic_conf.active_hint;
         shell_ref.lunaris_theme = self.lunaris_theme.clone();
+        // Feature 4-C: bump the window-header theme-generation
+        // counter so every cached per-window pixmap invalidates on
+        // the next frame. The rasteriser reads the current theme
+        // directly via `crate::theme::lunaris_theme()`.
+        crate::backend::render::window_header::bump_theme_generation();
         shell_ref.appearance_conf = self.config.cosmic_conf.appearance_settings;
         if let Some(zoom_state) = shell_ref.zoom_state.as_mut() {
             zoom_state.increment = self.config.cosmic_conf.accessibility_zoom.increment;
@@ -1571,7 +1576,239 @@ impl Common {
         self.refresh_idle_inhibit();
         self.a11y_keyboard_monitor_state.refresh();
         self.refresh_titlebar_modes();
+        self.refresh_window_headers();
         self.tick_fullscreen_reveal_timer();
+    }
+
+    /// Per-frame sync for Lunaris-rendered window headers.
+    ///
+    /// Covers three kinds of changes in one pass:
+    /// - geometry (position / width) — from set_geometry calls
+    /// - title text — from client commits
+    /// - activated flag — from set_focus
+    ///
+    /// Implementation keeps a cache of `last_sent_payload` per
+    /// `surface_id`. On each frame we compute the current payload
+    /// for every SSD window and diff; only actual changes emit
+    /// `window_header_update`. Windows that disappeared between
+    /// frames (e.g. closed without the destroyed-handler firing
+    /// yet — rare edge case) get a `window_header_hide` and their
+    /// cache entry removed.
+    ///
+    /// One-liner cost per frame is ~one allocation per mapped
+    /// window to read geometry + title; cheap relative to the
+    /// render pipeline itself.
+    /// Synchronously emit a `window_header_update` for exactly one
+    /// window, bypassing the full per-frame diff scan. Used by
+    /// `MoveGrab::motion` / `ResizeGrab::motion` (Feature 4:
+    /// latency-sync) so drag updates cost O(1) instead of O(n) per
+    /// pointer-motion event.
+    ///
+    /// The cache is still checked to avoid emitting redundant
+    /// events when sub-pixel motion rounds to the same position.
+    /// Silently no-ops if `mapped` is not eligible for a header.
+    pub(crate) fn refresh_window_header_for(&mut self, mapped: &crate::shell::CosmicMapped) {
+        let shell = self.shell.read();
+
+        // Prefer a drag-state payload if this window is currently
+        // being interactively moved: `window_header_payload`
+        // resolves the window's position via the workspace, which
+        // is `None` during a MoveGrab (the window is not in any
+        // workspace). Without this, per-motion updates emit
+        // nothing and the shell header freezes at its pre-drag
+        // position.
+        let mut payload: Option<crate::shell::WindowHeaderPayload> = None;
+        for seat in shell.seats.iter() {
+            let Some(grab_state_slot) = seat
+                .user_data()
+                .get::<crate::shell::grabs::SeatMoveGrabState>()
+            else {
+                continue;
+            };
+            let guard = grab_state_slot.lock().unwrap();
+            if let Some(grab_state) = guard.as_ref()
+                && &grab_state.window == mapped
+            {
+                payload = crate::shell::dragged_window_header_payload(grab_state);
+                break;
+            }
+        }
+        if payload.is_none() {
+            payload = crate::shell::window_header_payload(&shell, mapped);
+        }
+        drop(shell);
+        let Some(payload) = payload else {
+            return;
+        };
+        let cache = &mut self.window_header_cache;
+        let changed = match cache.get(&payload.surface_id) {
+            None => true,
+            Some(prev) => {
+                prev.x != payload.x
+                    || prev.y != payload.y
+                    || prev.width != payload.width
+                    || prev.height != payload.height
+                    || prev.title != payload.title
+                    || prev.activated != payload.activated
+                    || prev.stack_id != payload.stack_id
+            }
+        };
+        if !changed {
+            return;
+        }
+        if cache.contains_key(&payload.surface_id) {
+            self.shell_overlay_state.send_window_header_update(
+                payload.surface_id,
+                payload.x, payload.y,
+                payload.width, payload.height,
+                payload.title.clone(),
+                payload.activated,
+                payload.stack_id,
+            );
+        } else {
+            self.shell_overlay_state.send_window_header_show(
+                payload.surface_id,
+                payload.x, payload.y,
+                payload.width, payload.height,
+                payload.title.clone(),
+                payload.activated,
+                true, true,
+                payload.stack_id,
+            );
+        }
+        cache.insert(
+            payload.surface_id,
+            crate::shell::CachedHeaderPayload::from(&payload),
+        );
+    }
+
+    pub(crate) fn refresh_window_headers(&mut self) {
+        use crate::shell::{should_emit_shell_header_events, window_header_payload};
+
+        let shell = self.shell.read();
+        // Build current snapshot for all eligible windows. Feature
+        // 4-C switched non-stacked single-window headers over to
+        // compositor rendering (`CosmicWindow::header_render_element`),
+        // so we only emit shell-bound events for STACKS now; the
+        // tab strip still needs the shell to paint tabs + buttons.
+        let mut current: std::collections::HashMap<u32, crate::shell::WindowHeaderPayload> =
+            std::collections::HashMap::new();
+        for space in shell.workspaces.spaces() {
+            for mapped in space.mapped() {
+                if !should_emit_shell_header_events(mapped) {
+                    continue;
+                }
+                if let Some(payload) = window_header_payload(&shell, mapped) {
+                    current.insert(payload.surface_id, payload);
+                }
+            }
+        }
+        // Also scan sticky layers across all sets so sticky windows
+        // get headers too.
+        for set in shell.workspaces.sets.values() {
+            for mapped in set.sticky_layer.mapped() {
+                if !should_emit_shell_header_events(mapped) {
+                    continue;
+                }
+                if let Some(payload) = window_header_payload(&shell, mapped) {
+                    current.insert(payload.surface_id, payload);
+                }
+            }
+        }
+        // Feature 4 fix: windows inside an interactive MoveGrab are
+        // NOT in any workspace for the grab's lifetime — their
+        // rendering is driven from `MoveGrabState` on the seat's
+        // user-data. If we skipped them here the stale-check below
+        // would emit `window_header_hide` every frame during a
+        // drag and the Lunaris header would visually disappear
+        // until release. Poll each seat's grab state and overlay
+        // a live payload so (a) the dragged window stays in
+        // `current` (no hide), and (b) its position is updated
+        // once per frame from the same grab state the compositor
+        // is rendering from.
+        // Only surface drag-state headers for STACKS — Feature 4-C
+        // renders non-stacked single-window headers compositor-
+        // side, so the shell doesn't need updates for those.
+        for seat in shell.seats.iter() {
+            let Some(grab_state_slot) = seat
+                .user_data()
+                .get::<crate::shell::grabs::SeatMoveGrabState>()
+            else {
+                continue;
+            };
+            let guard = grab_state_slot.lock().unwrap();
+            if let Some(grab_state) = guard.as_ref()
+                && should_emit_shell_header_events(&grab_state.window)
+                && let Some(payload) =
+                    crate::shell::dragged_window_header_payload(grab_state)
+            {
+                current.insert(payload.surface_id, payload);
+            }
+        }
+        drop(shell);
+
+        // Diff against last-sent cache.
+        let cache = &mut self.window_header_cache;
+        // Emit updates for changed entries.
+        for (id, payload) in &current {
+            let changed = match cache.get(id) {
+                None => true,
+                Some(prev) => {
+                    prev.x != payload.x
+                        || prev.y != payload.y
+                        || prev.width != payload.width
+                        || prev.height != payload.height
+                        || prev.title != payload.title
+                        || prev.activated != payload.activated
+                        || prev.stack_id != payload.stack_id
+                }
+            };
+            if changed {
+                // new entries get `show` (first time), existing get
+                // `update`. No-op if the shell's store already has it
+                // from the map-time show call.
+                if cache.contains_key(id) {
+                    self.shell_overlay_state.send_window_header_update(
+                        payload.surface_id,
+                        payload.x, payload.y,
+                        payload.width, payload.height,
+                        payload.title.clone(),
+                        payload.activated,
+                        payload.stack_id,
+                    );
+                } else {
+                    self.shell_overlay_state.send_window_header_show(
+                        payload.surface_id,
+                        payload.x, payload.y,
+                        payload.width, payload.height,
+                        payload.title.clone(),
+                        payload.activated,
+                        true, true,
+                        payload.stack_id,
+                    );
+                }
+                // Cache the clone-able fields. The cache struct is a
+                // stripped-down copy of WindowHeaderPayload that
+                // implements Clone — see Common::window_header_cache.
+                cache.insert(*id, CachedHeaderPayload::from(payload));
+            }
+        }
+        // Hide stale entries (window gone between frames).
+        let stale: Vec<u32> = cache
+            .keys()
+            .filter(|id| !current.contains_key(id))
+            .copied()
+            .collect();
+        for id in stale {
+            self.shell_overlay_state.send_window_header_hide(id);
+            // Feature 4 (attach): notify any bound shell
+            // attachments that their target window is gone. The
+            // attachments themselves are still alive until the
+            // shell destroys them; they just stop tracking a
+            // window.
+            self.window_attach_state.unbind_window(id);
+            cache.remove(&id);
+        }
     }
 
     /// Check all surfaces with active titlebar bindings and send
@@ -1746,6 +1983,319 @@ impl Common {
         }
         self.popups.commit(surface);
     }
+}
+
+/// Decides whether the given window should receive a Lunaris-rendered
+/// header via the `lunaris-shell-overlay` `window_header_*` protocol.
+///
+/// Four inclusion criteria (all must be true):
+///
+/// 1. Wayland surface — X11 clients have their own decoration paradigm
+///    (MOTIF_WM_HINTS with inverted semantics — see decoration-spec
+///    discussion); excluded from v1 to avoid surprises.
+/// 2. Not a stack — stacks carry their own tab-bar which already IS
+///    the decoration.
+/// 3. Client requested SSD — `has_ssd == true` means the client either
+///    explicitly asked for server-side via xdg/kde-decoration, or it
+///    bound the protocol without committing a mode. Clients that draw
+///    their own CSD (GTK, Qt with default settings, Firefox, most
+///    Electron apps) never hit this branch.
+/// 4. Not fullscreen — fullscreen content shouldn't be pushed down by
+///    a 36px header.
+/// General eligibility check — is this window "dressable" at all?
+/// Used by both the compositor-rendered header path (Feature 4-C,
+/// single non-stacked windows) and the shell-rendered stack header
+/// path. Two callers share this so policy stays in one place.
+pub fn should_render_window_header(mapped: &CosmicMapped) -> bool {
+    let surface = mapped.active_window();
+    if surface.is_fullscreen(false) {
+        return false;
+    }
+
+    // Stacks always get a Lunaris header — their tabs render inside
+    // it (integrated design, see Feature 3). The per-tab window's
+    // own is_decorated() is forced to "undecorated" on stack
+    // creation (`try_force_undecorated(true)` in CosmicStack::new),
+    // so consulting the tab's xdg-decoration state here would be
+    // meaningless.
+    if mapped.is_stack() {
+        return true;
+    }
+
+    match surface.0.underlying_surface() {
+        smithay::desktop::WindowSurface::Wayland(_) => {
+            // Wayland semantics: `is_decorated()=true` means the
+            // client has CSD (xdg-decoration ClientSide or KDE
+            // non-Server). Skip — the client draws its own chrome.
+            !surface.is_decorated(false)
+        }
+        smithay::desktop::WindowSurface::X11(x11) => x11_should_render_header(x11),
+    }
+}
+
+/// Should this window's header events (`window_header_show` /
+/// `window_header_update` / `window_header_hide`) be sent to the
+/// desktop-shell process for Svelte rendering? Since Feature 4-C
+/// moves single-window headers into the compositor, the shell only
+/// needs events for **stacks** — its WindowHeader.svelte is still
+/// the thing drawing the tab strip integrated with the window
+/// controls (Feature 3). Non-stacked single-window headers are
+/// now fully handled by `CosmicWindow::header_render_element`
+/// during the GL render pass and the shell never sees them.
+pub fn should_emit_shell_header_events(mapped: &CosmicMapped) -> bool {
+    mapped.is_stack() && should_render_window_header(mapped)
+}
+
+/// Hybrid X11 header-eligibility heuristic. See blueprint Limitation 1
+/// analysis — ranks a window against four rules, all must pass:
+///
+/// 1. Not override-redirect, not popup, not a transient of another
+///    window. These are menus, tooltips, DnD feedback, modal dialogs
+///    — they get their own handling upstream.
+/// 2. `_NET_WM_WINDOW_TYPE` is either `Normal` or unset. Excludes
+///    Dialog, Utility, Toolbar, Menu, Dock, Dnd, Splash etc.
+/// 3. Content geometry is at least 200×100 logical px. Rules out
+///    tiny popups that slipped through the earlier filters.
+/// 4. Smithay's `X11Surface::is_decorated()` reports `false` —
+///    i.e., the app has NOT set Motif hints to `MWM_DECOR_NONE`.
+///    Unset Motif hints default to "please decorate" (the Motif
+///    spec default of `MWM_DECOR_ALL`), which is exactly the case
+///    where a Lunaris header is useful for legacy X11 apps that
+///    have no native chrome. Apps that set `MWM_DECOR_NONE`
+///    (modern GTK3+, Qt5 X11, Steam) draw their own title bar and
+///    MUST NOT get a second one from us.
+///
+/// The semantics of `is_decorated()` on X11 in the vendored
+/// Smithay (see `/src/xwayland/xwm/surface.rs:545`) match Wayland's
+/// — returns `true` for self-decorated clients — so the call above
+/// can be uniform across both branches at the higher level.
+fn x11_should_render_header(x11: &smithay::xwayland::X11Surface) -> bool {
+    use smithay::xwayland::xwm::WmWindowType;
+
+    if x11.is_override_redirect() {
+        tracing::debug!(
+            "X11-DEBUG window_id={} skipped: override_redirect",
+            x11.window_id()
+        );
+        return false;
+    }
+    if x11.is_popup() {
+        tracing::debug!(
+            "X11-DEBUG window_id={} skipped: popup",
+            x11.window_id()
+        );
+        return false;
+    }
+    if x11.is_transient_for().is_some() {
+        tracing::debug!(
+            "X11-DEBUG window_id={} skipped: transient_for present",
+            x11.window_id()
+        );
+        return false;
+    }
+
+    match x11.window_type() {
+        None | Some(WmWindowType::Normal) => {}
+        Some(other) => {
+            tracing::debug!(
+                "X11-DEBUG window_id={} skipped: window_type={:?}",
+                x11.window_id(), other
+            );
+            return false;
+        }
+    }
+
+    let geo = x11.geometry();
+    if geo.size.w < 200 || geo.size.h < 100 {
+        tracing::debug!(
+            "X11-DEBUG window_id={} skipped: size {}x{} below 200x100 gate",
+            x11.window_id(), geo.size.w, geo.size.h
+        );
+        return false;
+    }
+
+    if x11.is_decorated() {
+        tracing::debug!(
+            "X11-DEBUG window_id={} skipped: is_decorated()=true (app set MWM_DECOR_NONE)",
+            x11.window_id()
+        );
+        return false;
+    }
+
+    tracing::debug!(
+        "X11-DEBUG window_id={} eligible: size={}x{} type=Normal no_motif_none",
+        x11.window_id(), geo.size.w, geo.size.h
+    );
+    true
+}
+
+/// Derive the `window_header_show/update` payload for a window.
+/// Returns `None` if the window isn't eligible (see
+/// `should_render_window_header`) OR geometry can't be resolved yet
+/// (e.g. called before the workspace has placed the window).
+///
+/// Coordinates are GLOBAL: `output.geometry().loc + workspace_local_loc`.
+/// Width is taken from the window's geometry; height is always
+/// `SSD_HEIGHT` (36px, matches the compositor's reserved space).
+pub struct WindowHeaderPayload {
+    pub surface_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub title: String,
+    pub activated: bool,
+    /// Non-zero if this header belongs to a CosmicStack. The shell
+    /// uses it to correlate with the `tab_added/tab_activated/...`
+    /// stream and renders tabs inside the header. See Feature 3
+    /// (integrated stack header) for the design.
+    pub stack_id: u32,
+}
+
+/// Per-frame cache entry for the window-header diff loop. Same data
+/// as `WindowHeaderPayload` but without the surface_id (it's the
+/// HashMap key) and deriving `Clone` so we can snapshot the last
+/// sent values.
+#[derive(Clone, Debug)]
+pub(crate) struct CachedHeaderPayload {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub title: String,
+    pub activated: bool,
+    pub stack_id: u32,
+}
+
+impl From<&WindowHeaderPayload> for CachedHeaderPayload {
+    fn from(p: &WindowHeaderPayload) -> Self {
+        Self {
+            x: p.x, y: p.y,
+            width: p.width, height: p.height,
+            title: p.title.clone(),
+            activated: p.activated,
+            stack_id: p.stack_id,
+        }
+    }
+}
+
+/// Top bit used as a namespace marker for X11-originated surface ids
+/// in the `lunaris-shell-overlay::window_header_*` protocol. Wayland
+/// protocol ids (client-allocated, start at 2 and increment) never
+/// have this bit set in practice; X11 XIDs are 29-bit on all real X
+/// servers so masking with `0x7FFF_FFFF` doesn't lose information
+/// and shifting `0x8000_0000` in gives us a clean split.
+///
+/// The shell treats this as an opaque `u32` — it just echoes it back
+/// on `window_header_action`. Only the compositor-side resolver
+/// (`window_header_action` handler) needs to interpret the top bit to
+/// look the window up in the right table.
+pub const HEADER_ID_X11_NAMESPACE: u32 = 0x8000_0000;
+
+/// Derive the protocol surface-id for a mapped window's header.
+/// Stable across frames for the same window — both the refresh diff
+/// and the action resolver rely on this invariant.
+pub fn window_header_surface_id(mapped: &CosmicMapped) -> Option<u32> {
+    use smithay::reexports::wayland_server::Resource;
+
+    let surface = mapped.active_window();
+    match surface.0.underlying_surface() {
+        smithay::desktop::WindowSurface::Wayland(_) => {
+            // Wayland: use the wl_surface protocol id with the top
+            // bit forced clear. In practice client-allocated ids
+            // never have it set; the mask is a belt-and-braces.
+            let wl = surface.wl_surface()?;
+            Some(wl.id().protocol_id() & !HEADER_ID_X11_NAMESPACE)
+        }
+        smithay::desktop::WindowSurface::X11(x11) => {
+            // X11: XID (< 2^29 in practice) with the top bit set to
+            // declare the namespace. Keeps the id stable for the
+            // window's full lifetime and lets the action resolver
+            // pick the right surface family on lookup.
+            Some(x11.window_id() | HEADER_ID_X11_NAMESPACE)
+        }
+    }
+}
+
+/// Payload for a window whose position is currently driven by an
+/// interactive `MoveGrab` rather than a workspace layout. The
+/// per-frame refresh calls this for every active seat's move-grab
+/// state so the shell gets live header updates AND the window
+/// stays registered in `current` (which prevents the stale check
+/// from emitting `window_header_hide` mid-drag and making the
+/// header visually disappear — the exact symptom we hit).
+///
+/// Coordinates come directly from the grab state: `location +
+/// window_offset` is already the global-logical origin of the
+/// window as rendered (see `MoveGrabState::render`). No workspace
+/// lookup, no `space_for()` call — during a drag the window is
+/// not in any workspace.
+pub fn dragged_window_header_payload(
+    grab_state: &crate::shell::grabs::MoveGrabState,
+) -> Option<WindowHeaderPayload> {
+    let mapped = &grab_state.window;
+    if !should_render_window_header(mapped) {
+        return None;
+    }
+    let surface_id = window_header_surface_id(mapped)?;
+
+    let origin = grab_state.location.to_i32_round() + grab_state.window_offset;
+    let size = mapped.geometry().size;
+
+    let surface = mapped.active_window();
+    let stack_id = mapped
+        .stack_ref()
+        .map(|stack| stack.stack_id())
+        .unwrap_or(0);
+
+    Some(WindowHeaderPayload {
+        surface_id,
+        x: origin.x,
+        y: origin.y,
+        width: size.w,
+        height: element::window::SSD_HEIGHT,
+        title: surface.title(),
+        activated: surface.is_activated(false),
+        stack_id,
+    })
+}
+
+pub fn window_header_payload(
+    shell: &Shell,
+    mapped: &CosmicMapped,
+) -> Option<WindowHeaderPayload> {
+    if !should_render_window_header(mapped) {
+        return None;
+    }
+    let surface = mapped.active_window();
+    let surface_id = window_header_surface_id(mapped)?;
+
+    let workspace = shell.space_for(mapped)?;
+    let local_rect = workspace.element_geometry(mapped)?;
+    let output_geo = workspace.output().geometry();
+
+    // STACK-DEBUG: if this is a stack, tack its stack_id onto the
+    // payload so the shell can render tabs inside the header. 0 for
+    // non-stacks.
+    let stack_id = mapped
+        .stack_ref()
+        .map(|stack| stack.stack_id())
+        .unwrap_or(0);
+
+    Some(WindowHeaderPayload {
+        surface_id,
+        x: output_geo.loc.x + local_rect.loc.x,
+        // Header sits directly above the window content. The
+        // compositor already reserves SSD_HEIGHT pixels via
+        // has_ssd → window.rs adds SSD_HEIGHT to total height.
+        // The header lives in that reserved top strip.
+        y: output_geo.loc.y + local_rect.loc.y,
+        width: local_rect.size.w,
+        height: element::window::SSD_HEIGHT,
+        title: surface.title(),
+        activated: surface.is_activated(false),
+        stack_id,
+    })
 }
 
 impl Shell {
@@ -3078,6 +3628,17 @@ impl Shell {
         for mapped in active_space.mapped() {
             self.update_reactive_popups(mapped);
         }
+
+        // DECO-DEBUG: log map-time SSD decision for the just-mapped
+        // window. `is_decorated(pending=false)` reads current
+        // committed state. If Wayland-client with kde or xdg
+        // decoration set to Server/ServerSide, returns false →
+        // has_ssd = true. X11 surfaces go through their own path.
+        tracing::info!(
+            "DECO-DEBUG map_window app_id={:?} title={:?} is_decorated(committed)={} is_decorated(pending)={}",
+            window.app_id(), window.title(),
+            window.is_decorated(false), window.is_decorated(true)
+        );
 
         new_target
     }
@@ -5662,4 +6223,62 @@ pub fn check_grab_preconditions(
     }
 
     Some(start_data)
+}
+
+#[cfg(test)]
+mod header_id_tests {
+    use super::HEADER_ID_X11_NAMESPACE;
+
+    /// Simulate the Wayland encoding: take a protocol id and mask the
+    /// top bit off. Real Wayland client-allocated ids never use the
+    /// top bit anyway, but the mask is our safety net.
+    fn encode_wayland(protocol_id: u32) -> u32 {
+        protocol_id & !HEADER_ID_X11_NAMESPACE
+    }
+
+    /// Simulate the X11 encoding: take an XID and set the top bit.
+    fn encode_x11(xid: u32) -> u32 {
+        xid | HEADER_ID_X11_NAMESPACE
+    }
+
+    #[test]
+    fn wayland_encoding_clears_top_bit() {
+        assert_eq!(encode_wayland(0x0000_0002), 0x0000_0002);
+        assert_eq!(encode_wayland(0x007F_FFFF), 0x007F_FFFF);
+        assert_eq!(encode_wayland(0x0123_4567), 0x0123_4567);
+    }
+
+    #[test]
+    fn x11_encoding_sets_top_bit() {
+        assert_eq!(encode_x11(0x0020_0000), 0x8020_0000);
+        assert_eq!(encode_x11(0x0040_0042), 0x8040_0042);
+    }
+
+    #[test]
+    fn namespace_top_bit_is_reserved_for_x11() {
+        // Real protocol ids and real X11 XIDs, encoded, must land in
+        // distinct halves. Verify on a handful of realistic values
+        // (Wayland starts at 2, X11 XIDs begin around 0x200000).
+        let wl_ids: [u32; 4] = [0x02, 0xff, 0x00f0_0001, 0x1234];
+        let x11_ids: [u32; 4] = [0x0020_0000, 0x0040_0002, 0x00a0_0010, 0x0f00_0001];
+        for id in wl_ids.iter().copied() {
+            assert!(encode_wayland(id) & HEADER_ID_X11_NAMESPACE == 0);
+        }
+        for id in x11_ids.iter().copied() {
+            assert!(encode_x11(id) & HEADER_ID_X11_NAMESPACE != 0);
+        }
+    }
+
+    #[test]
+    fn encodings_are_round_trippable() {
+        // Given an encoded id, we can tell whether it's Wayland or
+        // X11 by inspecting the top bit — that's how the action
+        // resolver will dispatch.
+        let wl_encoded = encode_wayland(0x1234);
+        let x11_encoded = encode_x11(0x0020_1234);
+        assert_eq!(wl_encoded & HEADER_ID_X11_NAMESPACE, 0);
+        assert_eq!(x11_encoded & HEADER_ID_X11_NAMESPACE, HEADER_ID_X11_NAMESPACE);
+        // Recover the X11 XID by masking.
+        assert_eq!(x11_encoded & !HEADER_ID_X11_NAMESPACE, 0x0020_1234);
+    }
 }

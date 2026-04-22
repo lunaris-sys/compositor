@@ -138,7 +138,16 @@ impl CosmicStackInternal {
     }
 }
 
-pub const TAB_HEIGHT: i32 = 24;
+/// Vertical space a CosmicStack reserves at the top of its
+/// bounding box for the integrated Lunaris window header (tabs +
+/// min/max/close buttons, see Feature 3).
+///
+/// This MUST match `crate::shell::element::window::SSD_HEIGHT`
+/// (the same 36-px strip non-stacked SSD windows reserve). Keeping
+/// the two values aligned is how the shell can render a stacked
+/// Kitty identically to a non-stacked one: same height, same
+/// button positions, tabs instead of a plain title.
+pub const TAB_HEIGHT: i32 = crate::shell::element::window::SSD_HEIGHT;
 
 #[derive(Debug, Clone)]
 pub enum MoveResult {
@@ -1179,6 +1188,12 @@ impl PointerTarget<State> for CosmicStack {
     }
 
     fn motion(&self, seat: &Seat<State>, data: &mut State, event: &MotionEvent) {
+        // Disarm any double-click baseline if the pointer has moved
+        // far enough between the two clicks to look like an
+        // intentional drag. See seats::DoubleClickTracker for the
+        // distance threshold.
+        seat.double_click_tracker().invalidate_on_motion(event.location);
+
         let event = event.clone();
         {
             let p = self.p();
@@ -1292,9 +1307,14 @@ impl PointerTarget<State> for CosmicStack {
                             });
                         }
                     } else if event.button == 0x110 {
-                        // Left click: start drag
-                        let seat = seat.clone();
+                        // Left press on the stack title region: start
+                        // a drag, unless this is the second press of
+                        // a double-click in which case maximize-toggle.
                         let serial = event.serial;
+                        // See CosmicWindow::button for why we don't
+                        // read pointer.current_location() here — it
+                        // deadlocks the compositor under the outer
+                        // pointer Mutex held during button dispatch.
                         let active_surface = {
                             let p = self.p();
                             let active = p.active.load(Ordering::SeqCst);
@@ -1303,6 +1323,41 @@ impl PointerTarget<State> for CosmicStack {
                                 .map(Cow::into_owned)
                         };
                         if let Some(surface) = active_surface {
+                            use smithay::reexports::wayland_server::Resource;
+                            let target_id = surface.id().protocol_id() as u64;
+                            let is_double = seat.double_click_tracker().observe_press(
+                                event.time,
+                                event.button,
+                                target_id,
+                            );
+                            tracing::info!(
+                                "DCLK-DEBUG CosmicStack header press time={} \
+                                 button=0x{:x} target_id={} double={}",
+                                event.time, event.button, target_id, is_double
+                            );
+                            if is_double {
+                                let seat = seat.clone();
+                                let surface_cloned = surface.clone();
+                                self.handle.insert_idle(move |state| {
+                                    let mapped = {
+                                        let shell_r = state.common.shell.read();
+                                        shell_r.element_for_surface(&surface_cloned).cloned()
+                                    };
+                                    if let Some(mapped) = mapped {
+                                        tracing::info!(
+                                            "DCLK-DEBUG stack maximize_toggle target_id={}",
+                                            target_id
+                                        );
+                                        state.common.shell.write().maximize_toggle(
+                                            &mapped,
+                                            &seat,
+                                            &state.common.event_loop_handle,
+                                        );
+                                    }
+                                });
+                                return;
+                            }
+                            let seat = seat.clone();
                             self.handle.insert_idle(move |state| {
                                 let res = state.common.shell.write().move_request(
                                     &surface,
@@ -1315,6 +1370,20 @@ impl PointerTarget<State> for CosmicStack {
                                     false,
                                 );
                                 if let Some((grab, focus)) = res {
+                                    // Feature 4: synchronous
+                                    // drag_start before set_grab,
+                                    // same reasoning as
+                                    // CosmicWindow::button.
+                                    if let Some(sid) = grab.drag_surface_id() {
+                                        tracing::info!(
+                                            "ATTACH-DEBUG drag_start surface_id={} (stack)",
+                                            sid
+                                        );
+                                        state
+                                            .common
+                                            .shell_overlay_state
+                                            .send_window_drag_start(sid);
+                                    }
                                     if grab.is_touch_grab() {
                                         seat.get_touch().unwrap().set_grab(state, grab, serial);
                                     } else {
@@ -1381,6 +1450,11 @@ impl PointerTarget<State> for CosmicStack {
     }
 
     fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: u32) {
+        // Pointer left the stack; clear the double-click tracker so
+        // the next window's click doesn't inherit this stack's
+        // timing baseline.
+        seat.double_click_tracker().invalidate();
+
         {
             let p = self.p();
             let mut cursor_state = seat

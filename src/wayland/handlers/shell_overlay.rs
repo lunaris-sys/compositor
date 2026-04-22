@@ -139,84 +139,83 @@ impl ShellOverlayHandler for State {
     }
 
     fn window_header_action(&mut self, surface_id: u32, action: u32) {
-        use smithay::utils::SERIAL_COUNTER;
-
         let shell = self.common.shell.read();
+        // Resolve surface_id → mapped. The id carries an implicit
+        // namespace flag in its top bit (set = X11, clear = Wayland)
+        // — see `Shell::window_header_surface_id` for the mapping.
+        // Rather than encode the split here, delegate to the same
+        // helper that produced the id so the two paths can't drift.
         let mapped = shell.mapped().find(|m| {
-            m.active_window()
-                .wl_surface()
-                .map(|s| {
-                    use smithay::reexports::wayland_server::Resource;
-                    let id: u32 = s.as_ref().id().protocol_id();
-                    id == surface_id
-                })
-                .unwrap_or(false)
+            crate::shell::window_header_surface_id(m) == Some(surface_id)
         });
-
-        let Some(mapped) = mapped else {
+        let Some(mapped) = mapped.cloned() else {
             tracing::warn!(
                 "shell_overlay: window_header_action for unknown surface_id {}",
                 surface_id
             );
             return;
         };
-
         let surface = mapped.active_window();
+        tracing::info!(
+            "HEADER action={} surface_id={} app_id={:?}",
+            action, surface_id, surface.app_id()
+        );
+        std::mem::drop(shell);
+
         match action {
             1 => {
-                // Minimize
-                surface.set_minimized(true);
-            }
-            2 => {
-                // Toggle maximize
-                let maximized = surface.is_maximized(false);
-                surface.set_maximized(!maximized);
-                if let Some(toplevel) = surface.0.toplevel() {
-                    toplevel.send_configure();
+                // Minimize — the full shell-level flow (moves the
+                // window into Workspace::minimized_windows, triggers
+                // the animation, emits the event-bus event). Just
+                // calling `surface.set_minimized(true)` flipped the
+                // state flag but left the window on-screen.
+                let info = self.common.shell.write().minimize_request(&surface);
+                if let Some(info) = info {
+                    self.common.event_bus.emit_window_minimized(
+                        &info.window_id, &info.app_id,
+                        &info.title, &info.workspace_id,
+                    );
                 }
             }
+            2 => {
+                // Toggle maximize — `maximize_toggle` handles both
+                // directions (calls maximize_request or unmaximize_
+                // request internally) and triggers geometry +
+                // animation. The bare `surface.set_maximized` flip
+                // set the ToplevelState but never resized.
+                let seat = self.common.shell.read().seats.last_active().clone();
+                let evlh = self.common.event_loop_handle.clone();
+                self.common.shell.write().maximize_toggle(&mapped, &seat, &evlh);
+            }
             3 => {
-                // Close
+                // Close — stateless, the client receives the close
+                // event and handles it. No shell-side bookkeeping.
                 surface.close();
             }
             4 => {
-                // Move -- start interactive move via the last active seat
-                let seat = shell.seats.last_active().clone();
-                let serial = SERIAL_COUNTER.next_serial();
-                if let Some(wl_surface) = surface.wl_surface().map(std::borrow::Cow::into_owned) {
-                    let evlh = self.common.event_loop_handle.clone();
-                    std::mem::drop(shell);
-                    let res = self.common.shell.write().move_request(
-                        &wl_surface,
-                        &seat,
-                        serial,
-                        crate::shell::grabs::ReleaseMode::NoMouseButtons,
-                        false,
-                        &self.common.config,
-                        &evlh,
-                        false,
-                    );
-                    if let Some((grab, focus)) = res {
-                        if grab.is_touch_grab() {
-                            seat.get_touch().unwrap().set_grab(self, grab, serial);
-                        } else {
-                            seat.get_pointer()
-                                .unwrap()
-                                .set_grab(self, grab, serial, focus);
-                        }
-                    }
-                    return;
-                }
+                // Move — kept for explicit context-menu "Move" items
+                // that the shell might expose. The header TITLE drag
+                // no longer uses this path: the compositor's native
+                // PointerTarget routing in shell/element/window.rs
+                // handles title-area mousedowns directly (the shell's
+                // input-region is trimmed to the BUTTON area, so
+                // title-area pointer events pass through to the
+                // compositor). Using this path from a real pointer
+                // event would require plumbing a real serial through
+                // the protocol; synthesized serials break the grab.
+                tracing::warn!(
+                    "shell_overlay: HEADER_ACTION_MOVE via protocol — \
+                     title-drag should use native compositor routing; \
+                     action ignored"
+                );
             }
             _ => {
                 tracing::warn!(
                     "shell_overlay: unknown window_header_action {} for surface {}",
-                    action,
-                    surface_id
+                    action, surface_id
                 );
             }
         }
-        std::mem::drop(shell);
     }
 
     fn set_layout_mode(&mut self, mode: u32) {

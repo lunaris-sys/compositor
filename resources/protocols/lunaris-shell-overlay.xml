@@ -264,6 +264,14 @@
       <description summary="show a window header bar">
         Sent when a window with server-side decorations becomes visible.
         The shell should render a header bar at the given position.
+
+        If stack_id is non-zero the header belongs to a CosmicStack
+        and the shell should render tabs inside the header (left of
+        the title / window-control buttons). The shell correlates
+        the stack's tabs via the existing `tab_added` / `tab_removed`
+        / `tab_activated` events on that same stack_id. A stack_id
+        value of 0 means "not a stack" and the shell renders the
+        header with a simple title only.
       </description>
       <arg name="surface_id" type="uint" summary="unique surface identifier"/>
       <arg name="x" type="int" summary="x position in compositor global coordinates"/>
@@ -274,11 +282,13 @@
       <arg name="activated" type="uint" summary="1 if the window is focused"/>
       <arg name="has_minimize" type="uint" summary="1 if minimize button should be shown"/>
       <arg name="has_maximize" type="uint" summary="1 if maximize button should be shown"/>
+      <arg name="stack_id" type="uint" summary="stack id (0 = not a stack; &gt;0 = render tabs for this stack)"/>
     </event>
 
     <event name="window_header_update">
       <description summary="update a window header bar">
         Sent when a header bar's geometry, title, or activation state changes.
+        `stack_id` keeps the same semantics as in `window_header_show`.
       </description>
       <arg name="surface_id" type="uint" summary="surface identifier"/>
       <arg name="x" type="int" summary="x position"/>
@@ -287,6 +297,7 @@
       <arg name="height" type="int" summary="header height"/>
       <arg name="title" type="string" summary="window title"/>
       <arg name="activated" type="uint" summary="1 if focused"/>
+      <arg name="stack_id" type="uint" summary="stack id (0 = not a stack)"/>
     </event>
 
     <event name="window_header_hide">
@@ -305,6 +316,28 @@
       </description>
       <arg name="surface_id" type="uint" summary="surface identifier"/>
       <arg name="content_json" type="string" summary="JSON-serialized TitlebarState"/>
+    </event>
+
+    <event name="window_drag_start">
+      <description summary="interactive drag or resize just started">
+        Sent once, at the moment the compositor installs a move or
+        resize grab on the given window. During the drag the shell
+        will receive a burst of `window_header_update` events at
+        pointer-motion rate; this event lets it prepare — disable
+        CSS transitions on that header, switch its Svelte store to
+        synchronous writes, etc. Exactly one `window_drag_end` will
+        follow, even if the grab ends abnormally (window closed,
+        client crash, etc.).
+      </description>
+      <arg name="surface_id" type="uint" summary="surface identifier of the window being dragged"/>
+    </event>
+
+    <event name="window_drag_end">
+      <description summary="interactive drag or resize just ended">
+        Sent once, as the pointer/touch grab releases. The shell
+        restores its normal update path.
+      </description>
+      <arg name="surface_id" type="uint" summary="surface identifier of the window no longer being dragged"/>
     </event>
 
     <request name="window_header_action">

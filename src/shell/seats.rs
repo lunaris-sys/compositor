@@ -181,6 +181,222 @@ struct FocusedOutput(pub Mutex<Option<Output>>);
 #[derive(Default)]
 pub struct LastModifierChange(pub Mutex<Option<Serial>>);
 
+/// Per-seat tracker for double-click recognition in SSD/stack title
+/// regions. Populated by `CosmicWindow::button` and `CosmicStack::button`
+/// on every press in a `Focus::Header` zone; invalidated on pointer
+/// motion (any motion event seeds a baseline; motion beyond
+/// `DCLK_DISTANCE_PX` between clicks disarms the tracker) and on
+/// pointer-leave / focus-change out of the header zone.
+///
+/// A press is a double-click iff the previous press:
+///  * was on the SAME surface,
+///  * used the SAME mouse button, and
+///  * happened within `DCLK_TIME_MS` milliseconds.
+///
+/// The "pointer didn't travel far between clicks" requirement is
+/// enforced indirectly by `invalidate_on_motion`, which runs inside
+/// `PointerTarget::motion` where the pointer coordinates are safely
+/// available on the event. Deliberately NOT reading
+/// `seat.get_pointer().current_location()` from inside
+/// `PointerTarget::button` — Smithay holds the pointer's outer
+/// `Mutex` for the full duration of button dispatch, so any
+/// re-entrant `current_location()` call from that context deadlocks
+/// the whole compositor (we hit exactly that bug on the first
+/// press into a Kitty header).
+///
+/// Time comparisons use `wrapping_sub` because `ButtonEvent::time`
+/// is `u32` milliseconds and wraps every ~49 days.
+#[derive(Default)]
+pub struct DoubleClickTracker {
+    pub(crate) inner: Mutex<DoubleClickState>,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct DoubleClickState {
+    /// Event timestamp of the last recorded press (milliseconds,
+    /// `ButtonEvent::time`). `None` = no baseline.
+    pub last_time_ms: Option<u32>,
+    /// Which mouse button was last pressed (0x110 = left, etc.).
+    pub last_button: Option<u32>,
+    /// Logical pointer location from the most recent motion event
+    /// (populated by `invalidate_on_motion`, not by
+    /// `observe_press` — see the type doc for why).
+    pub last_motion_location: Option<Point<f64, smithay::utils::Logical>>,
+    /// Opaque identifier of the surface the last click targeted.
+    /// `wl_surface` protocol id for Wayland, `X11Window` XID for
+    /// XWayland — only equality matters, not the bit layout.
+    pub last_target_id: Option<u64>,
+}
+
+/// Maximum time between two presses that still counts as a
+/// double-click. 300 ms is the common OS default (macOS/Windows).
+pub const DCLK_TIME_MS: u32 = 300;
+
+/// Maximum pointer travel between two consecutive motion events that
+/// still keeps a double-click baseline armed. Anything larger is
+/// treated as an intentional drag gesture and resets the tracker.
+pub const DCLK_DISTANCE_PX: f64 = 10.0;
+
+impl DoubleClickTracker {
+    /// Record a fresh press and report whether it completes a
+    /// double-click against the previously recorded press.
+    ///
+    /// After this call the tracker always holds `(time, button,
+    /// target)` of the most recent press, regardless of the
+    /// returned `bool`. That makes triple-clicks behave like
+    /// single-click-then-double-click rather than double-click-twice.
+    pub fn observe_press(&self, time_ms: u32, button: u32, target_id: u64) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let is_double = match (inner.last_time_ms, inner.last_button, inner.last_target_id) {
+            (Some(prev_t), Some(prev_b), Some(prev_id)) => {
+                let dt = time_ms.wrapping_sub(prev_t);
+                prev_b == button && prev_id == target_id && dt <= DCLK_TIME_MS
+            }
+            _ => false,
+        };
+        if is_double {
+            // Reset so a third click is treated as a fresh baseline.
+            inner.last_time_ms = None;
+            inner.last_button = None;
+            inner.last_target_id = None;
+        } else {
+            inner.last_time_ms = Some(time_ms);
+            inner.last_button = Some(button);
+            inner.last_target_id = Some(target_id);
+        }
+        is_double
+    }
+
+    /// Invalidate the tracker. Call on pointer-leave, focus-change
+    /// out of the header zone, etc.
+    pub fn invalidate(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        *inner = DoubleClickState::default();
+    }
+
+    /// Update the motion baseline and invalidate if the pointer has
+    /// travelled more than `DCLK_DISTANCE_PX` since the last motion
+    /// sample. No-op when the tracker is empty. This runs inside
+    /// `PointerTarget::motion` where the current pointer location
+    /// is supplied on the event — **no** re-entrant
+    /// `current_location()` call, so no lock-ordering hazard.
+    pub fn invalidate_on_motion(&self, location: Point<f64, smithay::utils::Logical>) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(prev_loc) = inner.last_motion_location {
+            let dx = location.x - prev_loc.x;
+            let dy = location.y - prev_loc.y;
+            if (dx * dx + dy * dy).sqrt() > DCLK_DISTANCE_PX {
+                let empty = DoubleClickState::default();
+                *inner = empty;
+            }
+        }
+        inner.last_motion_location = Some(location);
+    }
+}
+
+#[cfg(test)]
+mod dclk_tests {
+    use super::*;
+    use smithay::utils::Point;
+
+    fn loc(x: f64, y: f64) -> Point<f64, smithay::utils::Logical> {
+        Point::from((x, y))
+    }
+
+    #[test]
+    fn first_press_is_not_a_double_click() {
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+    }
+
+    #[test]
+    fn second_press_within_threshold_is_a_double_click() {
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        assert!(t.observe_press(1200, 0x110, 1));
+    }
+
+    #[test]
+    fn second_press_after_threshold_is_not_a_double_click() {
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        assert!(!t.observe_press(1000 + DCLK_TIME_MS + 1, 0x110, 1));
+    }
+
+    #[test]
+    fn different_buttons_are_not_a_double_click() {
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        assert!(!t.observe_press(1100, 0x111, 1));
+    }
+
+    #[test]
+    fn different_targets_are_not_a_double_click() {
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        assert!(!t.observe_press(1100, 0x110, 2));
+    }
+
+    #[test]
+    fn motion_between_clicks_beyond_distance_disarms_double_click() {
+        // Two motion samples separated by >DCLK_DISTANCE_PX disarm
+        // the tracker. Second click is treated as a fresh baseline.
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        t.invalidate_on_motion(loc(100.0, 50.0));
+        t.invalidate_on_motion(loc(200.0, 50.0));
+        assert!(!t.observe_press(1100, 0x110, 1));
+    }
+
+    #[test]
+    fn motion_between_clicks_within_distance_preserves_double_click() {
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        t.invalidate_on_motion(loc(100.0, 50.0));
+        t.invalidate_on_motion(loc(103.0, 52.0));
+        assert!(t.observe_press(1100, 0x110, 1));
+    }
+
+    #[test]
+    fn triple_click_does_not_cascade() {
+        // [single, double, single], not [single, double, double].
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        assert!(t.observe_press(1100, 0x110, 1));
+        assert!(!t.observe_press(1200, 0x110, 1));
+    }
+
+    #[test]
+    fn invalidate_clears_baseline() {
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        t.invalidate();
+        assert!(!t.observe_press(1100, 0x110, 1));
+    }
+
+    #[test]
+    fn time_wrap_is_tolerated() {
+        let t = DoubleClickTracker::default();
+        // last press happened right before u32::MAX wrap.
+        let t0 = u32::MAX - 50;
+        let t1 = 100u32; // Wrapped forward by 150 ms.
+        assert!(!t.observe_press(t0, 0x110, 1));
+        assert!(t.observe_press(t1, 0x110, 1));
+    }
+
+    #[test]
+    fn first_motion_seeds_baseline_without_resetting() {
+        // The very first motion event establishes the baseline and
+        // must NOT invalidate an armed press — otherwise a user who
+        // touches the mouse between two rapid clicks would lose
+        // their double-click.
+        let t = DoubleClickTracker::default();
+        assert!(!t.observe_press(1000, 0x110, 1));
+        t.invalidate_on_motion(loc(100.0, 50.0));
+        assert!(t.observe_press(1100, 0x110, 1));
+    }
+}
+
 pub fn create_seat(
     dh: &DisplayHandle,
     seat_state: &mut SeatState<State>,
@@ -196,6 +412,7 @@ pub fn create_seat(
     userdata.insert_if_missing(SupressedButtons::default);
     userdata.insert_if_missing(ModifiersShortcutQueue::default);
     userdata.insert_if_missing(LastModifierChange::default);
+    userdata.insert_if_missing(DoubleClickTracker::default);
     userdata.insert_if_missing_threadsafe(SeatMoveGrabState::default);
     userdata.insert_if_missing_threadsafe(SeatMenuGrabState::default);
     userdata.insert_if_missing_threadsafe(CursorState::default);
@@ -256,6 +473,7 @@ pub trait SeatExt {
     fn supressed_buttons(&self) -> &SupressedButtons;
     fn modifiers_shortcut_queue(&self) -> &ModifiersShortcutQueue;
     fn last_modifier_change(&self) -> Option<Serial>;
+    fn double_click_tracker(&self) -> &DoubleClickTracker;
 
     fn cursor_geometry(
         &self,
@@ -339,6 +557,10 @@ impl SeatExt for Seat<State> {
             .0
             .lock()
             .unwrap()
+    }
+
+    fn double_click_tracker(&self) -> &DoubleClickTracker {
+        self.user_data().get::<DoubleClickTracker>().unwrap()
     }
 
     fn cursor_geometry(

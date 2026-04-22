@@ -253,6 +253,14 @@ pub struct Common {
     pub kiosk_child: Option<Child>,
     pub lunaris_theme: lunaris_theme::LunarisTheme,
 
+    /// Per-frame cache for the Lunaris window-header diff loop.
+    /// Keyed by `wl_surface.protocol_id()`. `refresh_window_headers`
+    /// computes the current payload for every SSD window each frame
+    /// and only emits `window_header_update` on actual change. See
+    /// `shell/mod.rs::refresh_window_headers` for the loop.
+    pub(crate) window_header_cache:
+        std::collections::HashMap<u32, crate::shell::CachedHeaderPayload>,
+
     // wayland state
     pub compositor_state: CompositorState,
     pub corner_radius_state: CornerRadiusState,
@@ -285,6 +293,11 @@ pub struct Common {
     pub overlap_notify_state: OverlapNotifyState,
     pub shell_overlay_state: ShellOverlayState,
     pub titlebar_manager_state: TitlebarManagerState,
+    /// State backing the `lunaris-window-attach-v1` protocol. See
+    /// Feature 4 (latency-sync) groundwork. v1 keeps the bindings
+    /// index dormant until the phase-2 renderer consumes it.
+    pub window_attach_state:
+        crate::wayland::protocols::window_attach::WindowAttachState,
     /// Fullscreen titlebar edge-reveal state machine.
     pub fullscreen_reveal: crate::shell::fullscreen_reveal::FullscreenRevealState,
     /// True while Super was pressed alone with no other key in between.
@@ -680,6 +693,11 @@ impl State {
         let shell_overlay_state =
             ShellOverlayState::new::<Self, _>(dh, client_has_no_security_context);
         let titlebar_manager_state = TitlebarManagerState::new(dh);
+        let window_attach_state =
+            crate::wayland::protocols::window_attach::WindowAttachState::new::<Self, _>(
+                dh,
+                client_has_no_security_context,
+            );
         let presentation_state = PresentationState::new::<Self>(dh, clock.id() as u32);
         let primary_selection_state = PrimarySelectionState::new::<Self>(dh);
         let cosmic_image_capture_source_state =
@@ -820,6 +838,7 @@ impl State {
 
                 kiosk_child: None,
                 lunaris_theme: lunaris_theme::LunarisTheme::load(),
+                window_header_cache: std::collections::HashMap::new(),
 
                 compositor_state,
                 corner_radius_state,
@@ -844,6 +863,7 @@ impl State {
                 overlap_notify_state,
                 shell_overlay_state,
                 titlebar_manager_state,
+                window_attach_state,
                 fullscreen_reveal: Default::default(),
                 super_tap_pending: false,
                 pending_menu_callbacks: HashMap::new(),

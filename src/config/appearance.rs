@@ -195,8 +195,36 @@ pub fn apply_to_theme(theme: &mut lunaris_theme::LunarisTheme, cfg: &AppearanceC
 
     if let Some(radius) = w.corner_radius {
         let r = radius as f32;
+        // Per-corner WINDOW outline radius (used for the overall
+        // window shape + shadow).
         theme.radius_s = [r, r, r, r];
-        tracing::info!("appearance: applied radius {r}");
+
+        // Radius scale — MUST match the shell's
+        // `apply_window_overrides` in
+        // `desktop-shell/src-tauri/src/theme/loader.rs`:
+        //   md = corner_radius
+        //   if md == 0: sm=0, lg=0  (user explicitly wants sharp)
+        //   else:        sm = max(md-4, 2), lg = md+4
+        // Without this the compositor-rendered window header
+        // (Feature 4-C) would stay on the preset's 8-px rounding
+        // even when the user requested square corners, which is
+        // exactly the visual bug reported here: `corner_radius = 0`
+        // but the header top corners remained rounded.
+        let md = radius;
+        let (sm_u, lg_u) = if md == 0 {
+            (0u32, 0u32)
+        } else {
+            (md.saturating_sub(4).max(2), md.saturating_add(4))
+        };
+        theme.radius_md = md as f32;
+        theme.radius_sm = sm_u as f32;
+        theme.radius_lg = lg_u as f32;
+
+        tracing::info!(
+            "appearance: applied corner_radius {radius} -> \
+             radius_s={:?} radius_sm={} radius_md={} radius_lg={}",
+            theme.radius_s, theme.radius_sm, theme.radius_md, theme.radius_lg,
+        );
     }
 
     if let Some(bw) = w.border_width {
@@ -414,21 +442,49 @@ fn handle_reload(path: &Path, state: &mut State) {
     let cfg = AppearanceConfig::load_from(path);
     set_appearance(cfg.clone());
 
-    // Re-compose the theme: start from theme.toml, apply appearance on top.
-    let mut theme = lunaris_theme::LunarisTheme::load();
-    apply_to_theme(&mut theme, &cfg);
+    // Re-compose the theme through the SAME path the compositor
+    // uses at startup (`crate::theme::compose_effective_theme` via
+    // the `replace_lunaris_theme` setter below). That path picks
+    // the Lunaris Dark / Light preset from `[theme] mode`, merges
+    // `theme.toml` on top, and THEN applies the appearance.toml
+    // overrides. Previously this function took the
+    // `lunaris_theme::LunarisTheme::load()` shortcut — which
+    // silently fell through to the Panda preset when `theme.toml`
+    // was empty, producing a Panda-coloured window header whenever
+    // the user touched `appearance.toml`. See the Theme Integration
+    // bug ticket attached to this change for the reproduction.
+    let theme = crate::theme::recompose_effective_theme();
+
     tracing::info!(
-        "appearance: composed theme radius_s={:?} active_hint={} window_hint={:?}",
-        theme.radius_s,
-        theme.active_hint,
-        theme.window_hint,
+        "appearance: composed theme (full) — \
+         mode={:?} bg_shell={:?} bg_app={:?} bg_card={:?} \
+         fg_primary={:?} fg_secondary={:?} accent={:?} \
+         border={:?} error={:?} \
+         radius_sm={} radius_md={} radius_lg={} radius_s={:?} \
+         active_hint={} window_hint={:?} font_sans={:?}",
+        cfg.theme.mode.as_deref().or(cfg.theme.active.as_deref()),
+        theme.bg_shell, theme.bg_app, theme.bg_card,
+        theme.fg_primary, theme.fg_secondary, theme.accent,
+        theme.border, theme.error,
+        theme.radius_sm, theme.radius_md, theme.radius_lg, theme.radius_s,
+        theme.active_hint, theme.window_hint, theme.font_sans,
     );
+
     crate::theme::replace_lunaris_theme(theme.clone());
     state.common.lunaris_theme = theme.clone();
     {
         let mut shell = state.common.shell.write();
         shell.lunaris_theme = theme;
     }
+
+    // Feature 4-C: window-header rasteriser keeps a per-window
+    // `MemoryRenderBuffer` cache keyed on a theme-generation
+    // counter. Bump it so every cached pixmap re-rasterises on
+    // the next frame with the new colours / radii. Without this
+    // a theme edit would only visibly apply to windows that
+    // happen to change their visual state (title change, hover,
+    // etc.) before the next user action.
+    crate::backend::render::window_header::bump_theme_generation();
 
     // Gaps are NOT handled here — they live in compositor.toml [layout]
     // and are managed by the existing compositor.toml watcher.
@@ -529,6 +585,63 @@ mod tests {
         let cfg: AppearanceConfig = toml::from_str("[window]\ncorner_radius = 0\n").unwrap();
         apply_to_theme(&mut theme, &cfg);
         assert_eq!(theme.radius_s, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn corner_radius_zero_zeros_all_radius_tiers() {
+        // Regression: the compositor-rendered Lunaris header
+        // (Feature 4-C) reads `theme.radius_md` for button and
+        // header-top rounding. If corner_radius=0 only zeroed
+        // radius_s (window outline) while leaving radius_md at
+        // the 8-px preset, the header kept rounded corners —
+        // which is the exact visual bug that led to this fix.
+        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
+        assert_eq!(theme.radius_md, 8.0, "sanity: preset starts at 8");
+        let cfg: AppearanceConfig =
+            toml::from_str("[window]\ncorner_radius = 0\n").unwrap();
+        apply_to_theme(&mut theme, &cfg);
+        assert_eq!(theme.radius_s, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(theme.radius_sm, 0.0);
+        assert_eq!(theme.radius_md, 0.0);
+        assert_eq!(theme.radius_lg, 0.0);
+    }
+
+    #[test]
+    fn corner_radius_nonzero_derives_sm_lg_like_shell() {
+        // Mirror the shell's derivation:
+        //   md = corner_radius
+        //   sm = max(md - 4, 2)
+        //   lg = md + 4
+        // The shell implementation lives in
+        // `desktop-shell/src-tauri/src/theme/loader.rs::apply_window_overrides`.
+        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
+        let cfg: AppearanceConfig =
+            toml::from_str("[window]\ncorner_radius = 12\n").unwrap();
+        apply_to_theme(&mut theme, &cfg);
+        assert_eq!(theme.radius_md, 12.0);
+        assert_eq!(theme.radius_sm, 8.0);
+        assert_eq!(theme.radius_lg, 16.0);
+    }
+
+    #[test]
+    fn corner_radius_small_values_clamp_sm_to_two() {
+        // md = 4 → sm should clamp to 2 (not 0), lg = 8.
+        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
+        let cfg: AppearanceConfig =
+            toml::from_str("[window]\ncorner_radius = 4\n").unwrap();
+        apply_to_theme(&mut theme, &cfg);
+        assert_eq!(theme.radius_md, 4.0);
+        assert_eq!(theme.radius_sm, 2.0);
+        assert_eq!(theme.radius_lg, 8.0);
+
+        // md = 3 → max(3-4=0, 2) = 2, lg = 7.
+        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
+        let cfg: AppearanceConfig =
+            toml::from_str("[window]\ncorner_radius = 3\n").unwrap();
+        apply_to_theme(&mut theme, &cfg);
+        assert_eq!(theme.radius_md, 3.0);
+        assert_eq!(theme.radius_sm, 2.0);
+        assert_eq!(theme.radius_lg, 7.0);
     }
 
     #[test]

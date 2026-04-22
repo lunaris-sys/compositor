@@ -313,6 +313,10 @@ impl ShellOverlayState {
 
 impl ShellOverlayState {
     /// Notify connected shells to show a window header bar.
+    ///
+    /// `stack_id = 0` signals a non-stack header. A nonzero value
+    /// tells the shell to render stack tabs (correlated through the
+    /// existing `tab_added` events on that same stack_id).
     #[allow(clippy::too_many_arguments)]
     pub fn send_window_header_show(
         &self,
@@ -325,6 +329,7 @@ impl ShellOverlayState {
         activated: bool,
         has_minimize: bool,
         has_maximize: bool,
+        stack_id: u32,
     ) {
         for instance in &self.instances {
             instance.window_header_show(
@@ -334,11 +339,14 @@ impl ShellOverlayState {
                 activated as u32,
                 has_minimize as u32,
                 has_maximize as u32,
+                stack_id,
             );
         }
     }
 
     /// Notify connected shells to update a window header bar.
+    /// `stack_id` semantics match `send_window_header_show`.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_window_header_update(
         &self,
         surface_id: u32,
@@ -348,6 +356,7 @@ impl ShellOverlayState {
         height: i32,
         title: String,
         activated: bool,
+        stack_id: u32,
     ) {
         for instance in &self.instances {
             instance.window_header_update(
@@ -355,6 +364,7 @@ impl ShellOverlayState {
                 x, y, width, height,
                 title.clone(),
                 activated as u32,
+                stack_id,
             );
         }
     }
@@ -363,6 +373,24 @@ impl ShellOverlayState {
     pub fn send_window_header_hide(&self, surface_id: u32) {
         for instance in &self.instances {
             instance.window_header_hide(surface_id);
+        }
+    }
+
+    /// Notify connected shells that an interactive drag/resize grab
+    /// has just started on the given window. Paired with exactly
+    /// one `send_window_drag_end(surface_id)` call, even when the
+    /// grab ends abnormally. See Feature 4 (latency-sync) rationale.
+    pub fn send_window_drag_start(&self, surface_id: u32) {
+        for instance in &self.instances {
+            instance.window_drag_start(surface_id);
+        }
+    }
+
+    /// Notify connected shells that the grab on the given window
+    /// just ended.
+    pub fn send_window_drag_end(&self, surface_id: u32) {
+        for instance in &self.instances {
+            instance.window_drag_end(surface_id);
         }
     }
 

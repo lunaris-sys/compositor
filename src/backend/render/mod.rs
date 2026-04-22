@@ -84,6 +84,7 @@ pub mod clipped_surface;
 pub mod cursor;
 pub mod element;
 pub mod shadow;
+pub mod window_header;
 use self::element::{AsGlowRenderer, CosmicElement};
 
 use super::kms::Timings;

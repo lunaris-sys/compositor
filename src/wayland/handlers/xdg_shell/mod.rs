@@ -276,7 +276,15 @@ impl XdgShellHandler for State {
 
         match shell.fullscreen_request(&surface, output.clone(), &self.common.event_loop_handle) {
             Some(target) => {
+                // Lunaris-Header: fullscreen → hide the header.
+                // Fullscreen windows should claim the entire output
+                // without a 36px strip at the top.
+                let header_id = {
+                    use smithay::reexports::wayland_server::Resource;
+                    surface.wl_surface().id().protocol_id()
+                };
                 std::mem::drop(shell);
+                self.common.shell_overlay_state.send_window_header_hide(header_id);
                 Shell::set_focus(self, Some(&target), &seat, None, true);
                 // Notify the Event Bus so the notification daemon can
                 // queue incoming notifications while fullscreen is active.
@@ -308,7 +316,30 @@ impl XdgShellHandler for State {
             });
 
         if let Some(target) = shell.unfullscreen_request(&surface, &self.common.event_loop_handle) {
+            // Lunaris-Header: compute payload BEFORE dropping the
+            // shell read-guard so geometry lookup still works.
+            // Feature 4-C: only emit shell-bound header for stacks;
+            // non-stacked windows get compositor-rendered headers.
+            let header_payload = {
+                let cosmic_surface = CosmicSurface::from(surface.clone());
+                shell
+                    .element_for_surface(cosmic_surface.wl_surface().as_deref().unwrap())
+                    .cloned()
+                    .filter(|m| crate::shell::should_emit_shell_header_events(m))
+                    .and_then(|m| crate::shell::window_header_payload(&shell, &m))
+            };
             std::mem::drop(shell);
+            if let Some(p) = header_payload {
+                tracing::info!(
+                    "HEADER show (post-fullscreen) surface_id={} x={} y={} w={} h={}",
+                    p.surface_id, p.x, p.y, p.width, p.height,
+                );
+                self.common.shell_overlay_state.send_window_header_show(
+                    p.surface_id, p.x, p.y, p.width, p.height,
+                    p.title, p.activated, true, true,
+                    p.stack_id,
+                );
+            }
             if should_focus {
                 Shell::set_focus(self, Some(&target), &seat, None, true);
             }
@@ -327,6 +358,19 @@ impl XdgShellHandler for State {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let app_id = CosmicSurface::from(surface.clone()).app_id();
         self.common.event_bus.emit_window_closed(&app_id);
+
+        // Lunaris-Header: tell the shell to forget about this window's
+        // header. Done BEFORE the unmap + surface destruction so the
+        // wl_surface is still queryable for its protocol_id. The shell
+        // treats hide-of-an-unknown-id as a no-op, so this is safe even
+        // if the window never got a header in the first place.
+        let header_id = {
+            use smithay::reexports::wayland_server::Resource;
+            surface.wl_surface().id().protocol_id()
+        };
+        tracing::info!("HEADER hide surface_id={}", header_id);
+        self.common.shell_overlay_state.send_window_header_hide(header_id);
+
         let (output, clients) = {
             let mut shell = self.common.shell.write();
             let seat = shell.seats.last_active().clone();

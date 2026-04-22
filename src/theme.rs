@@ -41,12 +41,84 @@ pub(crate) fn lunaris_hint_rgb(lt: &lunaris_theme::LunarisTheme) -> [f32; 3] {
 /// Compose a fresh theme.toml load with any current appearance.toml
 /// overrides. This is the single source of the "effective" theme used
 /// by the compositor render paths.
+///
+/// The base preset is chosen from `appearance.toml [theme] mode`,
+/// NOT from `lunaris_theme::LunarisTheme::load()` alone: if the
+/// user's `theme.toml` is empty or missing, we must still land on
+/// the canonical Lunaris dark/light palette (matching the shell's
+/// `dark.toml` / `light.toml`) rather than fall through to the
+/// historical Panda defaults — otherwise the compositor-rendered
+/// window header (Feature 4-C) renders in a completely different
+/// palette from the rest of the shell. See the Theme Integration
+/// story attached to this ticket for why this was the #1 bug
+/// reported after Feature 4-C landed.
+/// Public wrapper around `compose_effective_theme()`. External
+/// callers (currently the appearance watcher) rebuild the theme
+/// through this entry so the compose pipeline stays single-source.
+pub fn recompose_effective_theme() -> lunaris_theme::LunarisTheme {
+    compose_effective_theme()
+}
+
 fn compose_effective_theme() -> lunaris_theme::LunarisTheme {
-    let mut base = lunaris_theme::LunarisTheme::load();
-    if let Some(overrides) = crate::config::appearance::current_appearance() {
-        crate::config::appearance::apply_to_theme(&mut base, &overrides);
+    let appearance = crate::config::appearance::current_appearance();
+
+    // Pick the preset base. Default to dark — matches the Shell's
+    // default `:root { color-scheme: dark }`.
+    let mode_is_light = appearance
+        .as_ref()
+        .and_then(|a| a.theme.mode.as_deref().or(a.theme.active.as_deref()))
+        .map(|m| m.eq_ignore_ascii_case("light"))
+        .unwrap_or(false);
+    let preset = if mode_is_light {
+        lunaris_theme::LunarisTheme::lunaris_light()
+    } else {
+        lunaris_theme::LunarisTheme::lunaris_dark()
+    };
+
+    // Compose: user's theme.toml overrides (if any) on top of the
+    // preset. This way an empty / missing theme.toml leaves the
+    // Lunaris preset intact. `from_file_with_base` treats every
+    // field as optional so partial theme.toml files merge cleanly.
+    let theme_path = lunaris_theme::LunarisTheme::default_path();
+    let base = match std::fs::read_to_string(&theme_path) {
+        Ok(contents) => match toml::from_str::<lunaris_theme::LunarisThemeFile>(&contents) {
+            Ok(file) => lunaris_theme::LunarisTheme::from_file_with_base(file, preset),
+            Err(err) => {
+                tracing::warn!(
+                    "theme.toml parse error, using {} preset: {err}",
+                    if mode_is_light { "lunaris_light" } else { "lunaris_dark" }
+                );
+                preset
+            }
+        },
+        Err(_) => preset,
+    };
+
+    let mut composed = base;
+    if let Some(overrides) = appearance {
+        crate::config::appearance::apply_to_theme(&mut composed, &overrides);
     }
-    base
+
+    tracing::info!(
+        "theme: composed effective_theme (full) — \
+         mode={} preset-bg_app={:?} final-bg_shell={:?} final-bg_app={:?} \
+         final-fg_primary={:?} final-fg_secondary={:?} final-accent={:?} \
+         final-border={:?} final-error={:?} \
+         radius_sm={} radius_md={} radius_lg={} radius_window={:?} \
+         active_hint={} font_sans={:?} font_weight_medium={}",
+        if mode_is_light { "light" } else { "dark" },
+        if mode_is_light {
+            lunaris_theme::LunarisTheme::lunaris_light().bg_app
+        } else {
+            lunaris_theme::LunarisTheme::lunaris_dark().bg_app
+        },
+        composed.bg_shell, composed.bg_app,
+        composed.fg_primary, composed.fg_secondary, composed.accent,
+        composed.border, composed.error,
+        composed.radius_sm, composed.radius_md, composed.radius_lg, composed.radius_s,
+        composed.active_hint, composed.font_sans, composed.font_weight_medium,
+    );
+    composed
 }
 
 /// Initialize the global LunarisTheme and start a file watcher for live updates.
@@ -62,6 +134,12 @@ pub fn watch_theme(handle: LoopHandle<'_, State>) {
         state.common.lunaris_theme = lt.clone();
         let mut shell = state.common.shell.write();
         shell.lunaris_theme = lt;
+        // Feature 4-C: the window-header renderer pulls
+        // `lunaris_theme()` straight from this module but keeps a
+        // per-window pixmap cache keyed on a generation counter;
+        // bump it so every mapped window's header re-rasterises on
+        // the next frame without us having to walk the list.
+        crate::backend::render::window_header::bump_theme_generation();
     }) {
         tracing::error!("failed to insert lunaris theme ping source: {e}");
     }

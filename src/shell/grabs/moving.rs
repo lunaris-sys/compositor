@@ -54,15 +54,15 @@ pub type SeatMoveGrabState = Mutex<Option<MoveGrabState>>;
 const RESCALE_ANIMATION_DURATION: f64 = 150.0;
 
 pub struct MoveGrabState {
-    window: CosmicMapped,
-    window_offset: Point<i32, Logical>,
+    pub(crate) window: CosmicMapped,
+    pub(crate) window_offset: Point<i32, Logical>,
     indicator_thickness: u8,
     start: Instant,
     previous: ManagedLayer,
     snapping_zone: Option<SnappingZone>,
     stacking_indicator: Option<(StackHover, Point<i32, Logical>)>,
-    location: Point<f64, Logical>,
-    cursor_output: Output,
+    pub(crate) location: Point<f64, Logical>,
+    pub(crate) cursor_output: Output,
 }
 
 impl MoveGrabState {
@@ -355,6 +355,11 @@ pub struct MoveGrab {
     edge_snap_threshold: f64,
     // SAFETY: This is only used on drop which will always be on the main thread
     evlh: NotSend<LoopHandle<'static, State>>,
+    /// Captured at grab-create time, used to emit a matching
+    /// `window_drag_end` on drop. `None` for windows with no
+    /// Lunaris header (e.g. CSD toolboxes) — the drag/end events
+    /// are a no-op in that case.
+    drag_surface_id: Option<u32>,
 }
 
 impl MoveGrab {
@@ -504,6 +509,17 @@ impl PointerGrab<State> for MoveGrab {
         event: &MotionEvent,
     ) {
         self.update_location(state, event.location);
+
+        // ATTACH-DEBUG: push a synchronous header emit for the
+        // dragged window right after its position changes, inside
+        // the same pointer-motion tick. Without this the shell
+        // would only see the new header position after the next
+        // per-frame `Common::refresh` (Feature 4: latency-sync).
+        // Targeted to one window instead of a full O(n) scan so
+        // high-frequency mice (1 kHz) don't spend time re-diffing
+        // unrelated headers.
+        let window = self.window.clone();
+        state.common.refresh_window_header_for(&window);
 
         // While the grab is active, no client has pointer focus
         handle.motion(state, None, event);
@@ -782,6 +798,13 @@ impl MoveGrab {
             cursor_state.lock().unwrap().set_shape(CursorIcon::Grabbing);
         }
 
+        // Feature 4 (latency-sync): capture the drag surface id at
+        // grab-create time so (a) the caller can emit
+        // `window_drag_start` synchronously before any pointer
+        // motion can fire, and (b) Drop can emit `window_drag_end`
+        // with a matching id even when the grab ends abnormally.
+        let drag_surface_id = crate::shell::window_header_surface_id(&window);
+
         MoveGrab {
             window,
             start_data,
@@ -792,6 +815,7 @@ impl MoveGrab {
             release,
             edge_snap_threshold,
             evlh: NotSend(evlh),
+            drag_surface_id,
         }
     }
 
@@ -805,6 +829,13 @@ impl MoveGrab {
             GrabStartData::Pointer(_) => false,
         }
     }
+
+    /// Opaque surface id the caller passes to `send_window_drag_start`.
+    /// `None` for windows that don't get a Lunaris header (CSD or
+    /// ineligible X11 types).
+    pub fn drag_surface_id(&self) -> Option<u32> {
+        self.drag_surface_id
+    }
 }
 
 impl Drop for MoveGrab {
@@ -817,6 +848,21 @@ impl Drop for MoveGrab {
         let window = self.window.clone();
         let is_touch_grab = matches!(self.start_data, GrabStartData::Touch(_));
         let cursor_output = self.cursor_output.clone();
+        let drag_surface_id = self.drag_surface_id;
+
+        // ATTACH-DEBUG: always emit `window_drag_end` exactly once,
+        // even when the grab ends abnormally — e.g. client crash,
+        // window closed mid-drag. The shell uses this to flip its
+        // header back to the low-frequency update path.
+        if let Some(sid) = drag_surface_id {
+            let _ = self.evlh.0.insert_idle(move |state| {
+                tracing::info!(
+                    "ATTACH-DEBUG drag_end surface_id={}",
+                    sid
+                );
+                state.common.shell_overlay_state.send_window_drag_end(sid);
+            });
+        }
 
         let _ = self.evlh.0.insert_idle(move |state| {
             let position: Option<(CosmicMapped, Point<i32, Global>)> = if let Some(grab_state) =

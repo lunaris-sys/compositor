@@ -114,6 +114,26 @@ pub struct CosmicWindowInternal {
     last_title: Mutex<String>,
     tiled: AtomicBool,
     appearance_conf: Mutex<AppearanceConfig>,
+    /// Compositor-rendered Lunaris header cache (Feature 4-C).
+    /// Holds the last-rasterised `MemoryRenderBuffer` paired with
+    /// the `HeaderVisualState` snapshot that produced it. On every
+    /// frame, `CosmicWindow::header_render_element` builds a fresh
+    /// `HeaderVisualState` from current inputs; if it equals the
+    /// cached snapshot we reuse the existing buffer — no tiny-skia
+    /// / cosmic-text work — otherwise we rasterise anew and
+    /// replace. Keeps hot-path drag rendering at GPU-blit speed.
+    pub(crate) header_cache: Mutex<
+        Option<(
+            crate::backend::render::window_header::HeaderVisualState,
+            smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+        )>,
+    >,
+    /// Current pointer interaction with the window-control buttons,
+    /// updated by `PointerTarget::motion` / `PointerTarget::button`
+    /// when `current_focus() == Some(Focus::Header)`. Read by the
+    /// rasteriser via `HeaderVisualState::interaction`.
+    pub(crate) header_button_interaction:
+        Mutex<crate::backend::render::window_header::ButtonInteraction>,
 }
 
 #[repr(u8)]
@@ -244,6 +264,10 @@ impl CosmicWindow {
                 last_title: Mutex::new(String::new()),
                 tiled: AtomicBool::new(false),
                 appearance_conf: Mutex::new(appearance),
+                header_cache: Mutex::new(None),
+                header_button_interaction: Mutex::new(
+                    crate::backend::render::window_header::ButtonInteraction::Idle,
+                ),
             })),
             handle,
         }
@@ -569,6 +593,25 @@ impl CosmicWindow {
 
         // SSD header rendering removed: desktop-shell renders headers via protocol.
 
+        // Feature 4-C: prepend the compositor-rasterised Lunaris
+        // window header so it paints ON TOP of the client content.
+        // `elements[0]` is topmost in smithay's render order, so we
+        // insert at position 0. The header is eligible only for
+        // SSD-mode windows (the compositor reserved SSD_HEIGHT px
+        // at the top of the geometry for us); `header_render_element`
+        // short-circuits to `None` otherwise.
+        if let Some(header_element) =
+            self.header_render_element::<R>(renderer, location, scale)
+        {
+            elements.insert(
+                0,
+                CosmicWindowRenderElement::from(
+                    header_element,
+                )
+                .into(),
+            );
+        }
+
         elements.into_iter().map(C::from).collect()
     }
 
@@ -590,6 +633,265 @@ impl CosmicWindow {
     /// Force a redraw (no-op without Iced).
     pub(crate) fn force_redraw(&self) {
         // No-op: Iced rendering removed.
+    }
+
+    /// Return the header button (if any) that the given
+    /// logical-space pointer position sits over. Logical space is
+    /// the same one `PointerTarget::motion` / `button` receive via
+    /// `event.location`. `None` when the pointer is in the drag
+    /// zone or outside the header entirely.
+    pub fn header_button_at(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<crate::backend::render::window_header::HeaderButton> {
+        use crate::backend::render::window_header::{ButtonVisibility, HeaderVisualState, layout_buttons};
+        let width = {
+            let p = self.p();
+            if !p.has_ssd(false) {
+                return None;
+            }
+            p.window.geometry().size.w
+        };
+        let geo = {
+            let p = self.p();
+            p.window.geometry()
+        };
+        // Pointer position relative to the header's top-left. The
+        // header sits at the window geometry's origin; for the
+        // button layout we want the local (0,0) to be that origin.
+        let local_x = (location.x - geo.loc.x as f64) as f32;
+        let local_y = (location.y - geo.loc.y as f64) as f32;
+        if local_y < 0.0 || local_y >= SSD_HEIGHT as f32 {
+            return None;
+        }
+        let state = HeaderVisualState {
+            width,
+            activated: false,
+            title: String::new(),
+            buttons: ButtonVisibility { has_minimize: true, has_maximize: true },
+            interaction: crate::backend::render::window_header::ButtonInteraction::Idle,
+            scale: 1.0,
+            focused_button: None,
+            theme_generation: 0,
+        };
+        for b in layout_buttons(&state) {
+            if b.hit_test(local_x, local_y) {
+                return Some(b.button);
+            }
+        }
+        None
+    }
+
+    /// Refresh the cached `ButtonInteraction` from the current
+    /// pointer location. Called on every motion inside the header
+    /// zone; the next render frame picks up the new state and
+    /// either hits the pixmap cache (if the same button stays
+    /// hovered) or re-rasterises with the new hover visual.
+    ///
+    /// Press-tracking is handled separately in `button` — this
+    /// function only touches the Idle ↔ Hover transition, never
+    /// stomps a Pressed state.
+    pub(crate) fn update_header_button_interaction(
+        &self,
+        location: Point<f64, Logical>,
+    ) {
+        use crate::backend::render::window_header::ButtonInteraction;
+        let current_focus = self.p().current_focus();
+        if !matches!(current_focus, Some(Focus::Header)) {
+            // Leaving the header zone settles on Idle unless a press
+            // is still in flight.
+            let p = self.p();
+            let mut guard = p.header_button_interaction.lock().unwrap();
+            if !matches!(*guard, ButtonInteraction::Pressed(_)) {
+                *guard = ButtonInteraction::Idle;
+            }
+            return;
+        }
+        let over = self.header_button_at(location);
+        let p = self.p();
+        let mut guard = p.header_button_interaction.lock().unwrap();
+        let prev = *guard;
+        match *guard {
+            ButtonInteraction::Pressed(pressed_btn) => {
+                // Stay Pressed as long as the pointer remains over
+                // the same button. If it drifts off the button, keep
+                // the Pressed state to allow "press and drag off to
+                // cancel" behaviour on release.
+                if over != Some(pressed_btn) {
+                    // No change — keep Pressed; release handler decides.
+                    return;
+                }
+            }
+            _ => {
+                *guard = match over {
+                    Some(b) => ButtonInteraction::Hover(b),
+                    None => ButtonInteraction::Idle,
+                };
+            }
+        }
+        if *guard != prev {
+            tracing::debug!(
+                "HEADER-BTN-DEBUG hover transition: {:?} -> {:?}",
+                prev, *guard
+            );
+        }
+    }
+
+    /// If the pointer is currently hovering a header button (as
+    /// tracked by the most recent motion event),
+    /// flip the interaction state to `Pressed` and return the
+    /// button so the caller can intercept the left-press before
+    /// `move_request` takes over. Returns `None` when the pointer
+    /// is in the drag zone — caller falls back to the drag path.
+    ///
+    /// Reads ONLY the cached interaction state — no pointer
+    /// location lookup — because `PointerTarget::button` runs
+    /// under the pointer Mutex and `current_location()` would
+    /// deadlock (see DoubleClickTracker comment for the full story).
+    pub(crate) fn arm_header_button_press_from_hover(
+        &self,
+    ) -> Option<crate::backend::render::window_header::HeaderButton> {
+        use crate::backend::render::window_header::ButtonInteraction;
+        let p = self.p();
+        let mut guard = p.header_button_interaction.lock().unwrap();
+        match *guard {
+            ButtonInteraction::Hover(b) => {
+                *guard = ButtonInteraction::Pressed(b);
+                Some(b)
+            }
+            ButtonInteraction::Pressed(b) => Some(b),
+            ButtonInteraction::Idle => None,
+        }
+    }
+
+    /// Handle a release in the header zone: if we were Pressed on
+    /// a button and the pointer is still over the same button
+    /// (inferred from the stored Hover/Pressed target matching),
+    /// return it so the caller can invoke the action. Settles the
+    /// interaction state back to Hover/Idle afterwards.
+    pub(crate) fn finalize_header_button_release(
+        &self,
+    ) -> Option<crate::backend::render::window_header::HeaderButton> {
+        use crate::backend::render::window_header::ButtonInteraction;
+        let p = self.p();
+        let mut guard = p.header_button_interaction.lock().unwrap();
+        let fired = match *guard {
+            // Pressed state was held until release, and motion only
+            // clears it if the pointer left the button. So any
+            // remaining `Pressed(b)` on release means the click
+            // completed on the same button.
+            ButtonInteraction::Pressed(b) => Some(b),
+            _ => None,
+        };
+        // Settle back — stay Hover if the caller can tell us so, but
+        // since we don't read location here, default to Idle. The
+        // next motion event will re-arm Hover if appropriate.
+        *guard = ButtonInteraction::Idle;
+        fired
+    }
+
+    /// Produce a single `MemoryRenderBufferRenderElement` containing
+    /// the compositor-rasterised Lunaris header (Feature 4-C) at
+    /// `physical_location`. Returns `None` when this window is not
+    /// eligible for a header (CSD / stacked / fullscreen — see
+    /// `crate::shell::should_render_window_header` for the full
+    /// policy, but the authoritative eligibility check lives there
+    /// to keep the policy in one place).
+    ///
+    /// The element is produced from a cached `MemoryRenderBuffer`
+    /// keyed by a `HeaderVisualState`. Mouse motion that doesn't
+    /// change the hovered button, focus toggles that don't change
+    /// activated state, and re-renders with identical theme all
+    /// hit the cache and skip tiny-skia completely.
+    ///
+    /// `physical_location` is the output-space top-left of the
+    /// window including the 36-px header strip (i.e. the location
+    /// the caller passes to `render_elements`).
+    pub fn header_render_element<R>(
+        &self,
+        _renderer: &mut R,
+        physical_location: Point<i32, Physical>,
+        output_scale: Scale<f64>,
+    ) -> Option<
+        smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<R>,
+    >
+    where
+        R: AsGlowRenderer + smithay::backend::renderer::ImportMem,
+        R::TextureId: Send + Clone + 'static,
+    {
+        use crate::backend::render::window_header::{
+            self as wh, ButtonVisibility, HeaderVisualState, rasterize_header,
+        };
+
+        let (title, activated, width_logical, interaction, buttons) = {
+            let p = self.p();
+            // Only windows with SSD decorations get a Lunaris header
+            // (the `Shell::should_render_window_header` policy is
+            // already applied by the caller for the WAYLAND path;
+            // for X11 callers will gate via the same helper).
+            // We additionally guard locally so a late-stage state
+            // flip doesn't produce a zero-width header.
+            if !p.has_ssd(false) {
+                return None;
+            }
+            let title = p.window.title();
+            let activated = p.window.is_activated(false);
+            let geometry = p.window.geometry();
+            let width = geometry.size.w;
+            let interaction = *p.header_button_interaction.lock().unwrap();
+            // Minimize / maximize are always offered today. A
+            // future refinement can gate these on
+            // xdg_toplevel.wm_capabilities but the shell already
+            // treats them as always-on so stay consistent.
+            let buttons = ButtonVisibility { has_minimize: true, has_maximize: true };
+            (title, activated, width, interaction, buttons)
+        };
+        if width_logical <= 0 {
+            return None;
+        }
+
+        let state = HeaderVisualState {
+            width: width_logical,
+            activated,
+            title,
+            buttons,
+            interaction,
+            scale: output_scale.x,
+            focused_button: None,
+            theme_generation: wh::theme_generation(),
+        };
+
+        let buffer = {
+            let p = self.p();
+            let mut cache = p.header_cache.lock().unwrap();
+            let needs_rerasterise = match cache.as_ref() {
+                None => true,
+                Some((cached_state, _)) => cached_state != &state,
+            };
+            if needs_rerasterise {
+                let theme = crate::theme::lunaris_theme();
+                let new_buffer = rasterize_header(&state, &theme);
+                *cache = Some((state.clone(), new_buffer));
+            }
+            cache.as_ref().unwrap().1.clone()
+        };
+
+        // Convert physical location to logical coordinates
+        // expected by `MemoryRenderBufferRenderElement::from_buffer`.
+        // The header sits at the window's top-left corner.
+        let logical_loc = physical_location.to_f64().to_logical(output_scale);
+        let element =
+            smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement::from_buffer(
+                _renderer,
+                (logical_loc.x, logical_loc.y),
+                &buffer,
+                None,
+                None,
+                None,
+                smithay::backend::renderer::element::Kind::Unspecified,
+            )
+            .ok();
+        element
     }
 
     /// Returns the minimum size of the window including SSD header.
@@ -810,6 +1112,18 @@ impl PointerTarget<State> for CosmicWindow {
     }
 
     fn motion(&self, seat: &Seat<State>, _data: &mut State, event: &MotionEvent) {
+        // Disarm the double-click tracker if the pointer has moved
+        // far enough to look like an intentional drag between clicks.
+        // Cheap no-op when the tracker has no baseline.
+        seat.double_click_tracker().invalidate_on_motion(event.location);
+
+        // Feature 4-C: update the window-control button interaction
+        // state so the next frame's header rasterisation picks the
+        // right hover / pressed visuals. Only meaningful in the SSD
+        // header strip — `update_header_button_interaction` handles
+        // the "not in header" case by settling on `Idle`.
+        self.update_header_button_interaction(event.location);
+
         let p = self.p();
         let has_ssd = p.has_ssd(false);
         if has_ssd || p.has_tiled_state() {
@@ -844,38 +1158,173 @@ impl PointerTarget<State> for CosmicWindow {
         );
         match current_focus {
             Some(Focus::Header) => {
-                // Left click: drag start
+                // Left release: if we were pressing a header button
+                // (min/max/close), invoke the corresponding action
+                // instead of falling through to any default handler.
+                // Release of the right or middle button is ignored.
+                if event.state == smithay::backend::input::ButtonState::Released
+                    && event.button == 0x110
+                {
+                    if let Some(button) = self.finalize_header_button_release() {
+                        use crate::backend::render::window_header::HeaderButton;
+                        tracing::info!(
+                            "HEADER-BTN-DEBUG release fired={:?} (compositor-rendered)",
+                            button
+                        );
+                        let seat = seat.clone();
+                        let surface_opt = {
+                            let p = self.p();
+                            p.window.wl_surface().map(Cow::into_owned)
+                        };
+                        if let Some(surface) = surface_opt {
+                            self.handle.insert_idle(move |state| {
+                                let mapped = {
+                                    let shell_r = state.common.shell.read();
+                                    shell_r.element_for_surface(&surface).cloned()
+                                };
+                                let Some(mapped) = mapped else { return };
+                                match button {
+                                    HeaderButton::Minimize => {
+                                        let info = state
+                                            .common
+                                            .shell
+                                            .write()
+                                            .minimize_request(&mapped.active_window());
+                                        if let Some(info) = info {
+                                            state.common.event_bus.emit_window_minimized(
+                                                &info.window_id, &info.app_id,
+                                                &info.title, &info.workspace_id,
+                                            );
+                                        }
+                                    }
+                                    HeaderButton::Maximize => {
+                                        state.common.shell.write().maximize_toggle(
+                                            &mapped, &seat,
+                                            &state.common.event_loop_handle,
+                                        );
+                                    }
+                                    HeaderButton::Close => {
+                                        mapped.active_window().close();
+                                    }
+                                }
+                            });
+                        }
+                        return;
+                    }
+                }
+
+                // Left press: drag start OR, if this is the second
+                // press of a double-click, maximize-toggle instead.
+                // Release and repeat presses of non-left buttons fall
+                // through the tracker below without altering it.
                 if event.state == smithay::backend::input::ButtonState::Pressed
                     && event.button == 0x110
                 {
+                    // Feature 4-C: if the pointer is currently over
+                    // a window-control button, flip the interaction
+                    // to Pressed and intercept — no move grab, no
+                    // double-click tracking. The click action fires
+                    // on release in the branch above.
+                    if let Some(button) = self.arm_header_button_press_from_hover() {
+                        tracing::info!(
+                            "HEADER-BTN-DEBUG press armed {:?} (compositor-rendered)",
+                            button
+                        );
+                        return;
+                    }
+
                     let serial = event.serial;
-                    let seat = seat.clone();
-                    let surface = {
+                    // NOTE: do NOT read `seat.get_pointer().current_location()`
+                    // synchronously here. Smithay dispatches
+                    // `PointerTarget::button` with the pointer's outer
+                    // `Mutex` held; any re-entrant `current_location()`
+                    // call deadlocks the whole compositor. Pointer
+                    // distance for the double-click is enforced via the
+                    // motion handler's `invalidate_on_motion` instead.
+                    let surface_opt = {
                         let p = self.p();
                         p.window.wl_surface().map(Cow::into_owned)
                     };
-                    if let Some(surface) = surface {
-                        self.handle.insert_idle(move |state| {
-                            let res = state.common.shell.write().move_request(
-                                &surface,
-                                &seat,
-                                serial,
-                                ReleaseMode::NoMouseButtons,
-                                false,
-                                &state.common.config,
-                                &state.common.event_loop_handle,
-                                false,
-                            );
-                            if let Some((grab, focus)) = res {
-                                if grab.is_touch_grab() {
-                                    seat.get_touch().unwrap().set_grab(state, grab, serial);
-                                } else {
-                                    seat.get_pointer()
-                                        .unwrap()
-                                        .set_grab(state, grab, serial, focus);
+                    if let Some(surface) = surface_opt {
+                        use smithay::reexports::wayland_server::Resource;
+                        let target_id = surface.id().protocol_id() as u64;
+                        let is_double = seat.double_click_tracker().observe_press(
+                            event.time,
+                            event.button,
+                            target_id,
+                        );
+                        tracing::info!(
+                            "DCLK-DEBUG CosmicWindow header press time={} \
+                             button=0x{:x} target_id={} double={}",
+                            event.time, event.button, target_id, is_double
+                        );
+                        if is_double {
+                            let seat = seat.clone();
+                            let surface_cloned = surface.clone();
+                            self.handle.insert_idle(move |state| {
+                                let mapped = {
+                                    let shell_r = state.common.shell.read();
+                                    shell_r.element_for_surface(&surface_cloned).cloned()
+                                };
+                                if let Some(mapped) = mapped {
+                                    tracing::info!(
+                                        "DCLK-DEBUG maximize_toggle target_id={}",
+                                        target_id
+                                    );
+                                    state.common.shell.write().maximize_toggle(
+                                        &mapped,
+                                        &seat,
+                                        &state.common.event_loop_handle,
+                                    );
                                 }
-                            }
-                        });
+                            });
+                        } else {
+                            let seat = seat.clone();
+                            let surface = surface.clone();
+                            self.handle.insert_idle(move |state| {
+                                let res = state.common.shell.write().move_request(
+                                    &surface,
+                                    &seat,
+                                    serial,
+                                    ReleaseMode::NoMouseButtons,
+                                    false,
+                                    &state.common.config,
+                                    &state.common.event_loop_handle,
+                                    false,
+                                );
+                                if let Some((grab, focus)) = res {
+                                    // Feature 4: emit drag_start
+                                    // synchronously BEFORE installing
+                                    // the grab so the shell gets it
+                                    // before any pointer-motion
+                                    // header-update event. If we
+                                    // routed this through
+                                    // `insert_idle` again, motion
+                                    // events could race ahead and the
+                                    // shell would process the first
+                                    // update with CSS transitions
+                                    // still enabled — that's the
+                                    // "lag at drag start" symptom.
+                                    if let Some(sid) = grab.drag_surface_id() {
+                                        tracing::info!(
+                                            "ATTACH-DEBUG drag_start surface_id={}",
+                                            sid
+                                        );
+                                        state
+                                            .common
+                                            .shell_overlay_state
+                                            .send_window_drag_start(sid);
+                                    }
+                                    if grab.is_touch_grab() {
+                                        seat.get_touch().unwrap().set_grab(state, grab, serial);
+                                    } else {
+                                        seat.get_pointer().unwrap().set_grab(
+                                            state, grab, serial, focus,
+                                        );
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
                 // Right click: context menu
@@ -994,6 +1443,11 @@ impl PointerTarget<State> for CosmicWindow {
     }
 
     fn leave(&self, seat: &Seat<State>, _data: &mut State, _serial: Serial, _time: u32) {
+        // Pointer left the window entirely; any armed double-click
+        // baseline is moot. Clear it so the next window's first click
+        // doesn't accidentally cash in on this one's timestamp.
+        seat.double_click_tracker().invalidate();
+
         let p = self.p();
         let cursor_state = seat.user_data().get::<CursorState>().unwrap();
         cursor_state.lock().unwrap().unset_shape();

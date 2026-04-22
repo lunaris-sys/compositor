@@ -845,10 +845,50 @@ impl XwmHandler for State {
                 &mut self.common.workspace_state,
                 &self.common.event_loop_handle,
             );
+
+            // X11-DEBUG: emit the initial `window_header_show` right
+            // here instead of waiting for the next `refresh` diff,
+            // same as the Wayland map path in handlers/compositor.rs.
+            // That way a legacy Xterm-style app's Lunaris header
+            // lands at the same frame as the window itself, not one
+            // frame later.
+            //
+            // Feature 4-C: only emit for stacks; single windows get
+            // compositor-rendered headers.
+            let maybe_payload = shell
+                .element_for_surface(&window)
+                .filter(|m| crate::shell::should_emit_shell_header_events(m))
+                .and_then(|mapped| crate::shell::window_header_payload(&shell, mapped));
+
             if let Some(target) = res {
                 let seat = shell.seats.last_active().clone();
                 let app_id = window.app_id();
                 std::mem::drop(shell);
+                if let Some(payload) = maybe_payload {
+                    tracing::info!(
+                        "X11-DEBUG HEADER show surface_id={} app_id={:?} title={:?} \
+                         x={} y={} w={} h={}",
+                        payload.surface_id, app_id, payload.title,
+                        payload.x, payload.y, payload.width, payload.height,
+                    );
+                    // Snapshot first (borrows `payload`), then the
+                    // send_* call which moves `payload.title`.
+                    let cached = crate::shell::CachedHeaderPayload::from(&payload);
+                    let surface_id = payload.surface_id;
+                    self.common.shell_overlay_state.send_window_header_show(
+                        payload.surface_id,
+                        payload.x, payload.y,
+                        payload.width, payload.height,
+                        payload.title,
+                        payload.activated,
+                        true, true,
+                        payload.stack_id,
+                    );
+                    // Keep the refresh-diff cache consistent so the
+                    // next per-frame pass doesn't re-emit a redundant
+                    // show.
+                    self.common.window_header_cache.insert(surface_id, cached);
+                }
                 self.common.event_bus.emit_window_opened(&app_id);
                 Shell::set_focus(self, Some(&target), &seat, None, false);
             }

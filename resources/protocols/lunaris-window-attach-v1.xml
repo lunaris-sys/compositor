@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="lunaris_window_attach">
+  <copyright>
+    SPDX-License-Identifier: GPL-2.0-or-later
+  </copyright>
+
+  <description summary="Lunaris compositor-managed window attachments">
+    Ground-work protocol for eliminating the one-frame visible lag
+    between a CosmicSurface (xdg_toplevel) and its shell-rendered
+    Lunaris header.
+
+    Conceptually the shell declares "my wl_surface X should render
+    as if it were a synchronized subsurface of the toplevel whose
+    opaque `window_id` was last reported via the
+    `lunaris-shell-overlay::window_header_show` event". During
+    drag/resize the compositor then has enough local state to place
+    the header atomically together with the window on every frame,
+    without requiring another IPC round-trip per pointer motion.
+
+    v1 of this protocol only models the *binding* — the actual
+    renderer integration that lets the compositor position the
+    bound surface is a follow-up. v1 still gives us three concrete
+    wins today:
+
+    * The compositor can prove at server boot-up that a shell is
+      attach-aware (vs. the legacy fullscreen-layer approach).
+    * The shell can keep attachments across theme reloads / HMR
+      without rebuilding surfaces.
+    * Destroy / unbound lifecycle is well-defined and becomes the
+      forward-compat contract for phase 2 rendering.
+  </description>
+
+  <interface name="lunaris_window_attach_manager_v1" version="1">
+    <description summary="attachment manager">
+      Singleton global. The shell binds it once and uses it to
+      create one `lunaris_window_attachment_v1` object per header
+      `wl_surface` it wants the compositor to co-manage.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        Destroying the manager does not implicitly destroy any
+        attachments previously created through it — those remain
+        live until explicitly destroyed by the shell.
+      </description>
+    </request>
+
+    <request name="get_attachment">
+      <description summary="claim an attachment object for a wl_surface">
+        The resulting attachment is dormant until
+        `attach_to_window` is called. The underlying `wl_surface`
+        keeps its existing role (layer surface, etc.) and renders
+        normally.
+
+        It is a protocol error for the shell to request two
+        attachment objects for the same wl_surface.
+      </description>
+      <arg name="id" type="new_id" interface="lunaris_window_attachment_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"
+           summary="the shell-side surface to co-manage"/>
+    </request>
+  </interface>
+
+  <interface name="lunaris_window_attachment_v1" version="1">
+    <description summary="a single bound attachment">
+      Binds a shell surface to a compositor-managed window via the
+      opaque `window_id` that the `lunaris-shell-overlay` protocol
+      carries. Once bound, the compositor treats the attachment as
+      declared state: on every frame the attachment can be placed
+      at `(window.x + offset_x, window.y + offset_y)` with the
+      declared size, independently of when the shell last
+      committed. The renderer-side implementation of this placement
+      is staged: v1 accepts the binding and exposes debug info only.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="drop the attachment">
+        The underlying `wl_surface` returns to standalone rendering
+        on the next commit. If the surface is destroyed first the
+        attachment becomes inert and must still be destroyed
+        explicitly.
+      </description>
+    </request>
+
+    <request name="attach_to_window">
+      <description summary="bind this attachment to a compositor window">
+        `window_id` is the same opaque u32 that the
+        `lunaris-shell-overlay::window_header_show` event carries
+        (see `Shell::window_header_surface_id` on the compositor).
+        `offset_x`, `offset_y` are the attachment's origin relative
+        to the window's origin; `width` and `height` declare the
+        attachment's logical size for the compositor's layout
+        tracking. Calling `attach_to_window` again on a live
+        attachment is an implicit rebind.
+
+        If the target window does not exist the attachment emits
+        `unbound` on the next compositor tick.
+      </description>
+      <arg name="window_id" type="uint"
+           summary="opaque window identifier (matches window_header_show.surface_id)"/>
+      <arg name="offset_x" type="int" summary="attachment x offset from window origin"/>
+      <arg name="offset_y" type="int" summary="attachment y offset from window origin"/>
+      <arg name="width" type="int" summary="attachment width in logical pixels"/>
+      <arg name="height" type="int" summary="attachment height in logical pixels"/>
+    </request>
+
+    <request name="update_geometry">
+      <description summary="update offset and size without rebinding">
+        Cheaper than `attach_to_window` when only the offset or
+        dimensions change. Valid only on a currently bound
+        attachment; otherwise silently ignored.
+      </description>
+      <arg name="offset_x" type="int"/>
+      <arg name="offset_y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <event name="unbound">
+      <description summary="the attachment target window is gone">
+        Sent once when the window the attachment was bound to
+        disappears (close, unmap, session-lock). The attachment
+        object itself is still live — the shell should destroy it
+        explicitly.
+      </description>
+    </event>
+  </interface>
+</protocol>

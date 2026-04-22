@@ -497,6 +497,36 @@ impl State {
                 if let Some(target) = res {
                     let seat = shell.seats.last_active().clone();
                     let app_id = window.app_id();
+
+                    // Lunaris-Header: if the just-mapped window wants
+                    // SSD (Kitty et al.), emit the initial show event
+                    // before dropping the shell read-guard — we need
+                    // it live to look up the workspace/output geometry
+                    // for the payload.
+                    // Feature 4-C: only emit shell-bound header
+                    // events for stacks; single windows get their
+                    // Lunaris header compositor-rendered via
+                    // `CosmicWindow::header_render_element`.
+                    if let Some(mapped) = shell.element_for_surface(window.wl_surface().as_deref().unwrap()).cloned()
+                        && crate::shell::should_emit_shell_header_events(&mapped)
+                        && let Some(payload) = crate::shell::window_header_payload(&shell, &mapped)
+                    {
+                        tracing::info!(
+                            "HEADER show surface_id={} x={} y={} w={} h={} title={:?} active={} (stack)",
+                            payload.surface_id, payload.x, payload.y,
+                            payload.width, payload.height, payload.title, payload.activated,
+                        );
+                        self.common.shell_overlay_state.send_window_header_show(
+                            payload.surface_id,
+                            payload.x, payload.y,
+                            payload.width, payload.height,
+                            payload.title,
+                            payload.activated,
+                            true, true, // has_minimize, has_maximize
+                            payload.stack_id,
+                        );
+                    }
+
                     std::mem::drop(shell);
                     self.common.event_bus.emit_window_opened(&app_id);
                     Shell::set_focus(self, Some(&target), &seat, None, true);

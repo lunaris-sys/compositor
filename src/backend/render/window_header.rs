@@ -38,13 +38,14 @@
 //! rasteriser is only hit when the state actually changes (title,
 //! activation, hover, press, width, output scale).
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cosmic_text::{
-    Attrs, Buffer, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight,
-    Wrap,
-};
+// Note: the `cosmic_text` / `SwashCache` imports that used to drive
+// the title-text renderer were removed along with `draw_title` —
+// the window header no longer paints a title (user preference,
+// dragging is the sole function of the strip between buttons).
+// Keeping this comment as a pointer in case a future revision
+// wants to restore titles.
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -53,8 +54,8 @@ use smithay::{
     utils::Transform,
 };
 use tiny_skia::{
-    Color, FillRule, IntRect, Paint, PathBuilder, Pixmap, PixmapMut, PremultipliedColorU8, Rect,
-    Stroke, StrokeDash, Transform as SkiaTransform,
+    Color, FillRule, Paint, PathBuilder, Pixmap, PixmapMut, Rect,
+    Stroke, Transform as SkiaTransform,
 };
 
 use lunaris_theme::{LunarisTheme, Rgba};
@@ -82,13 +83,9 @@ pub const BUTTON_GAP: f32 = 2.0;
 /// in the legacy per-stack WindowHeader which this renderer
 /// replaced.
 pub const BUTTON_STRIP_RIGHT_PAD: f32 = 6.0;
-/// Left-side padding for the title text. Matches `.header-drag`
-/// CSS padding.
-pub const TITLE_LEFT_PAD: f32 = 12.0;
-/// Title font size in logical pixels. Matches `.header-title`
-/// `font-size: 13px`. Layout constant — the shell hard-codes 13
-/// here too, independent of `--text-base`.
-pub const TITLE_FONT_SIZE: f32 = 13.0;
+// Title-related layout constants (`TITLE_LEFT_PAD`,
+// `TITLE_FONT_SIZE`) removed along with the title renderer. See
+// the "Title rendering removed" note further down for why.
 /// Idle button opacity. Matches
 /// `.window-buttons :global(.control-btn) { opacity: 0.7 }`.
 /// Applied to both icon stroke and hover-bg tint so the whole
@@ -100,8 +97,21 @@ pub const BUTTON_IDLE_OPACITY: f32 = 0.7;
 /// handle this because it lives inside an app that's always the
 /// focused target of its own chrome.
 pub const BUTTON_IDLE_OPACITY_INACTIVE: f32 = 0.4;
-/// Icon stroke width, logical. Matches Lucide's default `strokeWidth=2`.
-pub const ICON_STROKE: f32 = 2.0;
+/// Lucide's `strokeWidth={2}` is given in the icon's 24-unit
+/// viewBox, not in physical pixels. When rendered at display
+/// size `N`, the physical stroke becomes `N * 2/24 = N/12`. So a
+/// 12-px Minus glyph in Lucide has a 1-px physical stroke, not
+/// 2 px — a detail the earlier fixed-2.0 constant was getting
+/// wrong and making our icons look chunkier than the CSS
+/// version.
+pub const LUCIDE_VIEWBOX: f32 = 24.0;
+pub const LUCIDE_STROKE_UNITS: f32 = 2.0;
+/// Stroke width for a Lucide icon rendered at `icon_size` display
+/// pixels. Matches the SVG scaling rule above.
+#[inline]
+pub fn lucide_stroke_width(icon_size: f32) -> f32 {
+    icon_size * LUCIDE_STROKE_UNITS / LUCIDE_VIEWBOX
+}
 /// Nominal icon sizes. Matches
 ///   `<Minus size={12} strokeWidth={2} />`
 ///   `<Square size={10} strokeWidth={2} />`
@@ -184,9 +194,14 @@ pub struct HeaderVisualState {
 
 impl PartialEq for HeaderVisualState {
     fn eq(&self, other: &Self) -> bool {
+        // NOTE: `title` is DELIBERATELY NOT compared. Title
+        // rendering is removed, so a title change has no visual
+        // effect on the pixmap. Including it in the equality check
+        // would trigger unnecessary re-rasterisation every time an
+        // app updates `xdg_toplevel.title`. If titles come back,
+        // reintroduce `&& self.title == other.title` here.
         self.width == other.width
             && self.activated == other.activated
-            && self.title == other.title
             && self.buttons == other.buttons
             && self.interaction == other.interaction
             && (self.scale - other.scale).abs() < f64::EPSILON
@@ -380,27 +395,9 @@ pub fn theme_generation() -> u64 {
     THEME_GENERATION.load(Ordering::Relaxed)
 }
 
-/// Shared cosmic-text font system. Loaded once per process, on the
-/// first call to `rasterize_header`. Initialising `FontSystem` is
-/// not cheap (it scans system font paths, builds the font DB) so
-/// we deliberately keep it in a `OnceLock` — never mutating it,
-/// only borrowing mutably via a `Mutex` guard passed through from
-/// the cache layer above.
-///
-/// cosmic-text loads Inter from `/usr/share/fonts/inter/…` if
-/// present, falls back to any other `Inter` family, and finally
-/// to `sans-serif` via fontconfig.
-fn font_system() -> &'static std::sync::Mutex<FontSystem> {
-    static FS: OnceLock<std::sync::Mutex<FontSystem>> = OnceLock::new();
-    FS.get_or_init(|| std::sync::Mutex::new(FontSystem::new()))
-}
-
-/// Shared swash glyph cache. Bundled with the font system because
-/// cosmic-text's swash cache keys on font IDs from the system.
-fn swash_cache() -> &'static std::sync::Mutex<SwashCache> {
-    static SC: OnceLock<std::sync::Mutex<SwashCache>> = OnceLock::new();
-    SC.get_or_init(|| std::sync::Mutex::new(SwashCache::new()))
-}
+// (Font-system helpers removed along with the title renderer.
+// See the "Title rendering removed" comment further down for
+// why; bring them back if titles return.)
 
 /// Rasterise a header to an `Argb8888` `MemoryRenderBuffer` ready
 /// for the render pipeline.
@@ -432,28 +429,22 @@ pub fn rasterize_header(
         "RENDER-DEBUG rasterize_header w={} h={} scale={:.2} activated={} \
          interaction={:?} theme_gen={} \
          bg=theme.bg_shell={:?} (shell-surface) \
-         title_active=fg_primary={:?} \
-         title_inactive=fg_primary@0.70={:?} \
-         btn_idle_op={} btn_inact_op={} btn_W={} btn_H={} \
+         icon_color=fg_primary={:?} \
+         btn_idle_op={} btn_inact_op={} btn_W={} btn_H={} gap={} right_pad={} \
          icon_sizes={{min:{},sqr:{},cls:{}}} \
+         lucide_stroke_at12={:.3}px lucide_stroke_at10={:.3}px \
          accent={:?} error={:?} border={:?} \
-         radius_md={} font_sans={:?} \
-         title_len={}",
+         radius_md={}",
         pixel_w, pixel_h, scale, state.activated,
         state.interaction, state.theme_generation,
-        theme.bg_shell,
-        theme.fg_primary,
-        {
-            let mut muted = theme.fg_primary;
-            muted[3] *= 0.70;
-            muted
-        },
+        theme.bg_shell, theme.fg_primary,
         BUTTON_IDLE_OPACITY, BUTTON_IDLE_OPACITY_INACTIVE,
-        BUTTON_LOGICAL_WIDTH, BUTTON_LOGICAL_HEIGHT,
+        BUTTON_LOGICAL_WIDTH, BUTTON_LOGICAL_HEIGHT, BUTTON_GAP,
+        BUTTON_STRIP_RIGHT_PAD,
         ICON_SIZE_MINUS, ICON_SIZE_SQUARE, ICON_SIZE_CLOSE,
+        lucide_stroke_width(12.0), lucide_stroke_width(10.0),
         theme.accent, theme.error, theme.border,
-        theme.radius_md, theme.font_sans,
-        state.title.len(),
+        theme.radius_md,
     );
 
     let mut pixmap = Pixmap::new(pixel_w.max(1), pixel_h.max(1))
@@ -467,7 +458,9 @@ pub fn rasterize_header(
     draw_bottom_border(&mut pixmap.as_mut(), state, theme, scale);
     let buttons = layout_buttons(state);
     draw_buttons(&mut pixmap.as_mut(), state, theme, scale, &buttons);
-    draw_title(&mut pixmap.as_mut(), state, theme, scale, &buttons);
+    // Title rendering removed: the header now consists of bg +
+    // bottom border + buttons only. The drag area between the
+    // left edge and the button strip stays a pure flat colour.
 
     // tiny-skia renders into premultiplied RGBA. MemoryRenderBuffer
     // with `Fourcc::Argb8888` + `Transform::Flipped180` matches the
@@ -497,39 +490,9 @@ fn rgba_to_bgra_inplace(data: &mut [u8]) {
     }
 }
 
-/// Extract the first concrete font-family name from a CSS-style
-/// font-family stack such as
-/// `"Inter Variable", ui-sans-serif, system-ui, sans-serif`.
-/// Skips generic-family keywords (`ui-sans-serif`, `system-ui`,
-/// `sans-serif`, `serif`, `monospace`) so cosmic-text can try the
-/// actual named font first and fall back on its own. Returns an
-/// empty string if nothing qualifies.
-pub(crate) fn primary_family_from_stack(stack: &str) -> String {
-    for raw in stack.split(',') {
-        let name = raw.trim().trim_matches('"').trim_matches('\'').trim();
-        if name.is_empty() {
-            continue;
-        }
-        let lower = name.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "ui-sans-serif"
-                | "ui-serif"
-                | "ui-monospace"
-                | "system-ui"
-                | "sans-serif"
-                | "serif"
-                | "monospace"
-                | "cursive"
-                | "fantasy"
-                | "emoji"
-        ) {
-            continue;
-        }
-        return name.to_owned();
-    }
-    String::new()
-}
+// `primary_family_from_stack` removed along with the title
+// renderer — it only existed to hand a single family name to
+// cosmic-text's `Family::Name`.
 
 /// Fill the header background with rounded top corners, matching
 /// the topbar's `background: var(--background)` — resolved inside
@@ -791,63 +754,104 @@ fn rounded_rect_path(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f3
     pb.close();
 }
 
-/// Draw the button's icon glyph centred on `b`. We hand-draw the
-/// three Lucide glyphs (Minus, Square, X) at the right nominal
-/// sizes with 2-px strokes; baking SVG would add a resvg
-/// dependency and is overkill for three paths.
+/// Draw the button's icon glyph, centred at `(b.center_x,
+/// b.center_y)`, at pixel-perfect parity with the Lucide SVG
+/// source the shell's `WindowControls.svelte` uses.
+///
+/// Every Lucide icon is authored in a 24×24 viewBox with
+/// `stroke="currentColor" stroke-width="2" stroke-linecap="round"
+/// stroke-linejoin="round" fill="none"`. We map the authored
+/// path coordinates (still in 24-unit space) onto our display
+/// `icon_size` with a linear scale — the same math an SVG
+/// renderer does when it honours the viewBox. That gets us
+/// identical geometry. The stroke width scales with the icon too
+/// (`icon_size/12` px for the canonical width-2), matching the
+/// SVG rendering exactly.
+///
+/// Authored paths this function draws:
+///   Minus:  `<path d="M5 12h14"/>`
+///   Square: `<rect width="18" height="18" x="3" y="3" rx="2"/>`
+///   X:      `<path d="M18 6 6 18"/>` + `<path d="m6 6 12 12"/>`
+///
+/// Hand-drawing instead of rasterising the SVG: brings in no
+/// resvg dependency, gives us explicit control over the path
+/// ordering (the X renders as two separate paths so each gets
+/// round caps at both ends, exactly like Lucide's dual `<path>`s).
 fn draw_button_icon(
     pixmap: &mut PixmapMut,
     b: &ButtonRect,
     color: Rgba,
     ts: SkiaTransform,
 ) {
+    let icon_size = match b.button {
+        HeaderButton::Minimize => ICON_SIZE_MINUS,
+        HeaderButton::Maximize => ICON_SIZE_SQUARE,
+        HeaderButton::Close => ICON_SIZE_CLOSE,
+    };
+    let stroke_w = lucide_stroke_width(icon_size);
+
+    // Lucide viewBox origin relative to our button centre. The
+    // Lucide coordinate frame is 24×24 with (0,0) top-left and
+    // (12,12) at the glyph centre.
+    let ox = b.center_x - icon_size * 0.5;
+    let oy = b.center_y - icon_size * 0.5;
+    let s = icon_size / LUCIDE_VIEWBOX;
+    // Map a Lucide (vx, vy) coordinate to display space.
+    let p = |vx: f32, vy: f32| -> (f32, f32) { (ox + vx * s, oy + vy * s) };
+
     let mut paint = Paint::default();
     paint.set_color(to_skia(color));
     paint.anti_alias = true;
     let mut stroke = Stroke::default();
-    stroke.width = ICON_STROKE;
+    stroke.width = stroke_w;
     stroke.line_cap = tiny_skia::LineCap::Round;
     stroke.line_join = tiny_skia::LineJoin::Round;
 
     match b.button {
         HeaderButton::Minimize => {
-            // A single horizontal line `—`, width = ICON_SIZE_MINUS.
-            let half = ICON_SIZE_MINUS * 0.5;
+            // Lucide `minus`: M5 12 h14  ≡  (5,12) → (19,12).
+            let (x1, y1) = p(5.0, 12.0);
+            let (x2, y2) = p(19.0, 12.0);
             let mut pb = PathBuilder::new();
-            pb.move_to(b.center_x - half, b.center_y);
-            pb.line_to(b.center_x + half, b.center_y);
+            pb.move_to(x1, y1);
+            pb.line_to(x2, y2);
             if let Some(path) = pb.finish() {
                 pixmap.stroke_path(&path, &paint, &stroke, ts, None);
             }
         }
         HeaderButton::Maximize => {
-            // Lucide Square: outlined rounded square. 12-px size,
-            // tiny corner radius to match Lucide's default 2.
-            let half = ICON_SIZE_SQUARE * 0.5;
+            // Lucide `square`:
+            //   <rect width="18" height="18" x="3" y="3" rx="2"/>
+            // Top-left at (3,3), size 18×18, corner radius 2 —
+            // both in viewBox units.
+            let (rx_tl, ry_tl) = p(3.0, 3.0);
+            let (rx_br, ry_br) = p(21.0, 21.0);
+            let rect_w = rx_br - rx_tl;
+            let rect_h = ry_br - ry_tl;
+            let corner = 2.0 * s;
             let mut pb = PathBuilder::new();
-            rounded_rect_path(
-                &mut pb,
-                b.center_x - half,
-                b.center_y - half,
-                ICON_SIZE_SQUARE,
-                ICON_SIZE_SQUARE,
-                2.0,
-            );
+            rounded_rect_path(&mut pb, rx_tl, ry_tl, rect_w, rect_h, corner);
             if let Some(path) = pb.finish() {
                 pixmap.stroke_path(&path, &paint, &stroke, ts, None);
             }
         }
         HeaderButton::Close => {
-            // Two diagonals forming `×`. Separate paths so the
-            // round line-caps render at the four endpoints and the
-            // crossing looks clean.
-            let half = ICON_SIZE_CLOSE * 0.5;
+            // Lucide `x`: two separate paths so each diagonal
+            // gets its own pair of round line-caps.
+            //   M18 6  6 18
+            //   m 6 6  12 12   (relative → absolute is 6,6 → 18,18)
+            let (a1x, a1y) = p(18.0, 6.0);
+            let (a2x, a2y) = p(6.0, 18.0);
             let mut pb1 = PathBuilder::new();
-            pb1.move_to(b.center_x - half, b.center_y - half);
-            pb1.line_to(b.center_x + half, b.center_y + half);
+            pb1.move_to(a1x, a1y);
+            pb1.line_to(a2x, a2y);
+
+            let (b1x, b1y) = p(6.0, 6.0);
+            let (b2x, b2y) = p(18.0, 18.0);
             let mut pb2 = PathBuilder::new();
-            pb2.move_to(b.center_x + half, b.center_y - half);
-            pb2.line_to(b.center_x - half, b.center_y + half);
+            pb2.move_to(b1x, b1y);
+            pb2.line_to(b2x, b2y);
+
             if let Some(path) = pb1.finish() {
                 pixmap.stroke_path(&path, &paint, &stroke, ts, None);
             }
@@ -856,242 +860,26 @@ fn draw_button_icon(
             }
         }
     }
-    // `StrokeDash` isn't used but importing it silences an unused
-    // warning that we'd otherwise have to sprinkle `allow(unused)`
-    // attributes for.
-    let _ = StrokeDash::new(vec![1.0, 0.0], 0.0);
 }
 
-/// Render the title text, left-aligned, ellipsis-truncated so it
-/// never overlaps the button strip. Uses cosmic-text for shaping
-/// + swash for glyph rasterisation (both are pure-Rust and already
-/// vendored via our Cargo deps).
-///
-/// The truncation rule matches CSS's
-/// `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`:
-/// layout the full title, find the last glyph that fits in the
-/// available width, append `…`.
-fn draw_title(
-    pixmap: &mut PixmapMut,
-    state: &HeaderVisualState,
-    theme: &LunarisTheme,
-    scale: f64,
-    buttons: &[ButtonRect],
-) {
-    if state.title.is_empty() {
-        return;
-    }
-    let leftmost_button_x = buttons
-        .iter()
-        .map(|b| b.center_x - b.width * 0.5)
-        .fold(f32::INFINITY, f32::min);
-    let available_right = if leftmost_button_x.is_finite() {
-        // Leave an 8-px gap between title and the button strip.
-        leftmost_button_x - 8.0
-    } else {
-        state.width as f32 - BUTTON_STRIP_RIGHT_PAD
-    };
-    let available_w = (available_right - TITLE_LEFT_PAD).max(0.0);
-    if available_w < 4.0 {
-        return;
-    }
+// Title rendering removed.
+//
+// The compositor window header used to draw the window's
+// `xdg_toplevel.title` between the left edge of the drag zone and
+// the button strip, using cosmic-text + SwashCache. That text
+// renderer was deleted along with the helpers `font_system`,
+// `swash_cache`, `primary_family_from_stack`, `draw_title`, and
+// `blit_glyph`, in favour of a title-less header: the drag strip
+// is now a pure flat-colour region. `state.title` is retained in
+// `HeaderVisualState` because the shell's other code paths
+// (stack tabs via the `lunaris-shell-overlay` protocol) still
+// consume it — the rasteriser just never renders it.
+//
+// Restoring titles is additive: re-introduce the helper, call it
+// from `rasterize_header`, put the `TITLE_LEFT_PAD` /
+// `TITLE_FONT_SIZE` constants back. See the git history for the
+// full body if needed.
 
-    // Title colour — mirrors `.window-header` / `.window-header.activated`
-    // inside the `.shell-surface` CSS context. `--muted-foreground`
-    // there is `color-mix(fg_primary 70%, transparent 30%)`, NOT
-    // `fg_secondary`. See `button_visual` for the same treatment.
-    let color_rgba = if state.activated {
-        theme.fg_primary
-    } else {
-        let mut muted = theme.fg_primary;
-        muted[3] *= 0.70;
-        muted
-    };
-
-    let mut fs = font_system().lock().unwrap();
-    let mut sc = swash_cache().lock().unwrap();
-
-    // Theme-driven font pick. `theme.font_sans` is a CSS-style
-    // font-family stack (e.g.
-    // `"Inter Variable", ui-sans-serif, system-ui, sans-serif`).
-    // cosmic-text's `Family::Name` takes a single family — pull
-    // the first non-empty, non-generic name from the stack. If
-    // nothing works out we fall back to `sans-serif` so rendering
-    // never panics on a misconfigured theme.
-    let family_name = primary_family_from_stack(&theme.font_sans);
-    let family = if family_name.is_empty() {
-        Family::SansSerif
-    } else {
-        Family::Name(&family_name)
-    };
-    let attrs = Attrs::new()
-        .family(family)
-        .weight(Weight(theme.font_weight_medium))
-        .style(Style::Normal)
-        .cache_key_flags(CacheKeyFlags::empty());
-
-    // Build a temporary buffer sized to the available width, wrap
-    // disabled, no line break — truncation only. Metrics are in
-    // logical px; the physical scaling happens at blit time.
-    let metrics = Metrics::new(TITLE_FONT_SIZE, TITLE_FONT_SIZE * 1.2);
-    let mut buffer = Buffer::new(&mut fs, metrics);
-    buffer.set_size(&mut fs, Some(f32::INFINITY), Some(HEADER_LOGICAL_HEIGHT as f32));
-    buffer.set_wrap(&mut fs, Wrap::None);
-    buffer.set_text(&mut fs, &state.title, &attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(&mut fs, true);
-
-    let title_y_baseline =
-        ((HEADER_LOGICAL_HEIGHT as f32 - TITLE_FONT_SIZE) * 0.5).floor();
-
-    // Collect glyph advances so we know where to cut.
-    let mut full_advance = 0.0_f32;
-    for run in buffer.layout_runs() {
-        for g in run.glyphs.iter() {
-            full_advance = full_advance.max(g.x + g.w);
-        }
-    }
-
-    let needs_ellipsis = full_advance > available_w;
-
-    if needs_ellipsis {
-        // Re-shape with progressively shorter prefixes until we
-        // find one that fits including the ellipsis glyph. Simple
-        // linear scan — titles are short.
-        let ellipsis = "…";
-        let mut candidate = state.title.clone();
-        // Reserve space for the ellipsis by iteratively trimming.
-        while !candidate.is_empty() {
-            let trial = format!("{}{}", candidate, ellipsis);
-            buffer.set_text(&mut fs, &trial, &attrs, Shaping::Advanced, None);
-            buffer.shape_until_scroll(&mut fs, true);
-            let mut adv = 0.0_f32;
-            for run in buffer.layout_runs() {
-                for g in run.glyphs.iter() {
-                    adv = adv.max(g.x + g.w);
-                }
-            }
-            if adv <= available_w {
-                break;
-            }
-            // Trim one grapheme off the end.
-            // cosmic-text handles unicode but we use `char_indices`
-            // for simplicity — good enough for titles.
-            let mut end = candidate.len();
-            while end > 0 {
-                end -= 1;
-                if candidate.is_char_boundary(end) {
-                    break;
-                }
-            }
-            candidate.truncate(end);
-        }
-    }
-
-    // Draw the (possibly truncated) buffer.
-    let ts = SkiaTransform::from_scale(scale as f32, scale as f32);
-    let color = to_skia(color_rgba);
-    let premul = PremultipliedColorU8::from_rgba(
-        (color.red() * color.alpha() * 255.0) as u8,
-        (color.green() * color.alpha() * 255.0) as u8,
-        (color.blue() * color.alpha() * 255.0) as u8,
-        (color.alpha() * 255.0) as u8,
-    )
-    .unwrap_or(PremultipliedColorU8::from_rgba(0, 0, 0, 255).unwrap());
-
-    for run in buffer.layout_runs() {
-        for glyph in run.glyphs.iter() {
-            let physical = glyph.physical((0.0, 0.0), scale as f32);
-            if let Some(image) =
-                sc.get_image(&mut fs, physical.cache_key).as_ref()
-            {
-                let glyph_x = (TITLE_LEFT_PAD + glyph.x) * scale as f32 + physical.x as f32
-                    + image.placement.left as f32;
-                let glyph_y = (title_y_baseline + run.line_y) * scale as f32 + physical.y as f32
-                    - image.placement.top as f32;
-                blit_glyph(
-                    pixmap,
-                    &image.data,
-                    image.placement.width as i32,
-                    image.placement.height as i32,
-                    glyph_x as i32,
-                    glyph_y as i32,
-                    premul,
-                );
-            }
-        }
-    }
-    // `ts` currently only used by the scaled strokes above. Keep
-    // the binding live so future baked icons can reuse it.
-    let _ = ts;
-}
-
-/// Paint a single glyph alpha mask into the pixmap with straight
-/// alpha compositing. cosmic-text/swash hand us `Alpha` or
-/// `Subpixel` RGBA masks; we treat both as alpha for now (fine for
-/// non-subpixel rendering on composited displays).
-fn blit_glyph(
-    pixmap: &mut PixmapMut,
-    mask: &[u8],
-    mw: i32,
-    mh: i32,
-    dst_x: i32,
-    dst_y: i32,
-    color: PremultipliedColorU8,
-) {
-    if mw <= 0 || mh <= 0 {
-        return;
-    }
-    // cosmic-text hands back either 1-byte-per-pixel Alpha masks
-    // or 3-byte-per-pixel Subpixel masks; bytes_per_row on the
-    // Alpha path equals width. We assume Alpha for simplicity.
-    if mask.len() as i32 != mw * mh {
-        return;
-    }
-    let pw = pixmap.width() as i32;
-    let ph = pixmap.height() as i32;
-    let dst_rect = IntRect::from_xywh(
-        dst_x.max(0),
-        dst_y.max(0),
-        ((dst_x + mw).min(pw) - dst_x.max(0)).max(0) as u32,
-        ((dst_y + mh).min(ph) - dst_y.max(0)).max(0) as u32,
-    );
-    let Some(_) = dst_rect else {
-        return;
-    };
-    let stride = pw as usize * 4;
-    let data = pixmap.data_mut();
-    for iy in 0..mh {
-        let py = dst_y + iy;
-        if py < 0 || py >= ph {
-            continue;
-        }
-        for ix in 0..mw {
-            let px = dst_x + ix;
-            if px < 0 || px >= pw {
-                continue;
-            }
-            let mi = (iy * mw + ix) as usize;
-            let alpha = mask[mi] as f32 / 255.0;
-            if alpha <= 0.0 {
-                continue;
-            }
-            let di = py as usize * stride + px as usize * 4;
-            let fg_r = color.red() as f32 * alpha;
-            let fg_g = color.green() as f32 * alpha;
-            let fg_b = color.blue() as f32 * alpha;
-            let fg_a = color.alpha() as f32 * alpha;
-            let bg_r = data[di] as f32;
-            let bg_g = data[di + 1] as f32;
-            let bg_b = data[di + 2] as f32;
-            let bg_a = data[di + 3] as f32;
-            let inv = 1.0 - (fg_a / 255.0);
-            data[di] = (fg_r + bg_r * inv).min(255.0) as u8;
-            data[di + 1] = (fg_g + bg_g * inv).min(255.0) as u8;
-            data[di + 2] = (fg_b + bg_b * inv).min(255.0) as u8;
-            data[di + 3] = (fg_a + bg_a * inv).min(255.0) as u8;
-        }
-    }
-}
 
 // ===== Tests =====
 
@@ -1238,9 +1026,12 @@ mod tests {
         c.activated = false;
         assert_ne!(a, c);
 
+        // `title` is intentionally NOT part of equality — title
+        // rendering is removed, so a title swap alone should NOT
+        // invalidate the cached pixmap.
         let mut d = a.clone();
         d.title = "Other Window".into();
-        assert_ne!(a, d);
+        assert_eq!(a, d, "title change must not invalidate the cache");
 
         let mut e = a.clone();
         e.interaction = ButtonInteraction::Hover(HeaderButton::Close);
@@ -1337,30 +1128,7 @@ mod tests {
         assert_eq!(data, vec![3u8, 2, 1, 4, 7, 6, 5, 8]);
     }
 
-    #[test]
-    fn primary_family_picks_first_named_family() {
-        assert_eq!(
-            primary_family_from_stack(
-                r#""Inter Variable", ui-sans-serif, system-ui, sans-serif"#
-            ),
-            "Inter Variable"
-        );
-    }
-
-    #[test]
-    fn primary_family_skips_all_generics_returns_empty() {
-        assert_eq!(primary_family_from_stack("ui-sans-serif, sans-serif"), "");
-    }
-
-    #[test]
-    fn primary_family_trims_quotes_and_whitespace() {
-        assert_eq!(primary_family_from_stack("  'JetBrains Mono'  "), "JetBrains Mono");
-    }
-
-    #[test]
-    fn primary_family_handles_empty_input() {
-        assert_eq!(primary_family_from_stack(""), "");
-    }
+    // primary_family_* tests removed along with the title renderer.
 
     #[test]
     fn rasterize_uses_theme_radius_not_hardcoded() {
@@ -1403,6 +1171,53 @@ mod tests {
         state.focused_button = Some(HeaderButton::Close);
         let theme = LunarisTheme::lunaris_dark();
         let _ = rasterize_header(&state, &theme);
+    }
+
+    // ── Lucide icon geometry ──────────────────────────────────
+    // The window-control buttons render hand-drawn Lucide paths
+    // (see `draw_button_icon`). These tests encode the Lucide
+    // source geometry — any future tweak that drifts us off-spec
+    // will fail here before it becomes a visual regression.
+
+    #[test]
+    fn lucide_stroke_width_scales_with_icon_size() {
+        // stroke-width="2" in a 24-unit viewBox. At display size
+        // N, the physical stroke is N * 2/24 = N/12.
+        assert!((lucide_stroke_width(12.0) - 1.0).abs() < 1e-5);
+        assert!((lucide_stroke_width(24.0) - 2.0).abs() < 1e-5);
+        assert!((lucide_stroke_width(10.0) - 10.0 / 12.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lucide_minus_line_length_matches_svg_path() {
+        // `<path d="M5 12h14"/>` = line (5,12) → (19,12), viewBox
+        // span 14. At icon_size 12 the physical line length is
+        // 12 * 14/24 = 7.0 px.
+        let vb_span = 19.0 - 5.0;
+        let phys = ICON_SIZE_MINUS * vb_span / LUCIDE_VIEWBOX;
+        assert!((phys - 7.0).abs() < 1e-5, "minus line should be 7px at icon_size=12, got {phys}");
+    }
+
+    #[test]
+    fn lucide_square_rect_fills_18_of_24() {
+        // `<rect width="18" height="18" x="3" y="3" rx="2"/>`.
+        // At icon_size 10: rect 10 * 18/24 = 7.5px, rx = 10 * 2/24.
+        let rect = ICON_SIZE_SQUARE * 18.0 / LUCIDE_VIEWBOX;
+        let rx = ICON_SIZE_SQUARE * 2.0 / LUCIDE_VIEWBOX;
+        assert!((rect - 7.5).abs() < 1e-5, "square rect size {rect}");
+        assert!((rx - 10.0 / 12.0).abs() < 1e-5, "square rx {rx}");
+    }
+
+    #[test]
+    fn lucide_x_diagonals_span_12_of_24() {
+        // Diagonals go from (6,6) to (18,18) etc — span 12 units.
+        // At icon_size 12: 12 * 12/24 = 6.0 px diagonal extent
+        // per axis (i.e. ±3 px from centre).
+        let extent_per_axis = ICON_SIZE_CLOSE * 12.0 / LUCIDE_VIEWBOX;
+        assert!((extent_per_axis - 6.0).abs() < 1e-5, "X diagonal axis extent {extent_per_axis}");
+        // Endpoints sit `extent/2` from centre.
+        let offset_from_centre = extent_per_axis * 0.5;
+        assert!((offset_from_centre - 3.0).abs() < 1e-5);
     }
 
     #[test]

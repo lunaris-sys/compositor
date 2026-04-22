@@ -142,7 +142,17 @@ impl State {
                     "waypointer_open" | "waypointer_toggle" => {
                         self.common.shell_overlay_state.send_waypointer_open();
                     }
-                    "workspace_overlay_open" | "workspace_overlay_toggle" => {
+                    // Canonical name is `workspace_map_open` since Lunaris
+                    // renamed the overlay UI to "Workspace Map". The old
+                    // `workspace_overlay_*` names remain aliased so
+                    // existing user configs (and the catalog entry with
+                    // the old action string) keep working without a
+                    // compositor restart contract break. All four names
+                    // land on the same Wayland event.
+                    "workspace_map_open"
+                    | "workspace_map_toggle"
+                    | "workspace_overlay_open"
+                    | "workspace_overlay_toggle" => {
                         // The shell decides whether this opens fresh or
                         // cycles focus to the next window — receiving
                         // the same event twice is the explicit cycle

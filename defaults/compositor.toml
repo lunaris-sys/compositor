@@ -42,6 +42,9 @@ workspace_switch_duration = 250  # ms
 inner_gap = 8         # Gap between tiled windows (px)
 outer_gap = 8         # Gap at screen edges (px)
 smart_gaps = true     # No gaps when single window
+tiled_headers = false # Show compositor-rendered title bar on tiled SSD windows
+                      # (false matches i3/sway/hyprland convention; stacks
+                      # always show their tab-bar header regardless)
 
 # [[layout.window_rules]]
 # match = { app_id = "pavucontrol" }

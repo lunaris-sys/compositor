@@ -192,6 +192,14 @@ pub struct LayoutConfig {
     pub outer_gap: i32,
     /// When true, no gaps are applied when a workspace has only one tiled window.
     pub smart_gaps: bool,
+    /// Render Lunaris window-control headers on **single tiled** SSD
+    /// windows. Default `false` to match tiling-WM convention
+    /// (i3, sway, hyprland) — tiled chrome is dead pixels in a
+    /// keyboard-driven layout. Stacks always keep their tab-bar
+    /// header regardless of this setting (the tab-bar is
+    /// functional UI for window-switching, not pure decoration).
+    /// Floating windows always keep their headers regardless.
+    pub tiled_headers: bool,
     /// Window rules for float/tile decisions.
     pub window_rules: Vec<WindowRule>,
 }
@@ -202,6 +210,7 @@ impl Default for LayoutConfig {
             inner_gap: 8,
             outer_gap: 8,
             smart_gaps: true,
+            tiled_headers: false,
             window_rules: Vec::new(),
         }
     }
@@ -538,6 +547,9 @@ fn parse_layout_config(table: &toml::Table) -> LayoutConfig {
     if let Some(b) = section.get("smart_gaps").and_then(|v| v.as_bool()) {
         layout.smart_gaps = b;
     }
+    if let Some(b) = section.get("tiled_headers").and_then(|v| v.as_bool()) {
+        layout.tiled_headers = b;
+    }
 
     // Parse [[layout.window_rules]] array.
     if let Some(rules) = section.get("window_rules").and_then(|v| v.as_array()) {
@@ -571,10 +583,12 @@ fn parse_layout_config(table: &toml::Table) -> LayoutConfig {
     }
 
     tracing::info!(
-        "layout config: inner_gap={} outer_gap={} smart_gaps={} rules={}",
+        "layout config: inner_gap={} outer_gap={} smart_gaps={} \
+         tiled_headers={} rules={}",
         layout.inner_gap,
         layout.outer_gap,
         layout.smart_gaps,
+        layout.tiled_headers,
         layout.window_rules.len(),
     );
 
@@ -1604,6 +1618,11 @@ fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
     let toml = load_toml_config(toml_path);
     let new = toml.cosmic;
 
+    // Capture old toggle state before we replace the layout so we can
+    // detect a tiled_headers flip and trigger a reconfigure storm only
+    // when the bool actually changed.
+    let old_tiled_headers = state.common.config.layout.tiled_headers;
+
     // Update layout config and keybindings.
     state.common.config.layout = toml.layout;
     state.common.config.toml_keybindings = toml.keybindings;
@@ -1651,6 +1670,13 @@ fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
             workspace.tiling_layer.recalculate();
         }
         shell.window_rules = layout.window_rules.clone();
+        // Apply tiled_headers toggle only when the value actually changed.
+        // The setter walks all tiled non-stack windows and sends a configure
+        // roundtrip so the client repaints at the new size, then bumps the
+        // theme generation so cached header textures are invalidated.
+        if layout.tiled_headers != old_tiled_headers {
+            shell.set_tiled_headers_enabled(layout.tiled_headers);
+        }
     }
 
     // Compare old vs new to determine which side effects to trigger.

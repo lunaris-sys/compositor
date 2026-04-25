@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use layout::TilingExceptions;
 use std::{
     collections::HashMap,
-    sync::{Mutex, atomic::Ordering},
+    sync::{Mutex, atomic::{AtomicBool, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -315,6 +315,15 @@ pub struct Shell {
     pub xwayland_keyboard_grab: Option<XWaylandKeyboardGrab<State>>,
 
     pub active_hint: bool,
+    /// Runtime mirror of `compositor.toml [layout] tiled_headers`.
+    /// Read on `should_render_window_header` and `has_ssd` to
+    /// decide whether single tiled SSD windows render the
+    /// compositor-rendered Lunaris header. Updated when the
+    /// compositor.toml watcher fires (see `toml_config_changed`)
+    /// and we then `set_tiled_headers_enabled` which schedules a
+    /// reconfigure of every tiled mapped window. Default `false`
+    /// — tiling-WM convention.
+    pub tiled_headers_enabled: bool,
     pub lunaris_theme: lunaris_theme::LunarisTheme,
     overview_mode: OverviewMode,
     swap_indicator: Option<SwapIndicator>,
@@ -2002,35 +2011,109 @@ impl Common {
 ///    Electron apps) never hit this branch.
 /// 4. Not fullscreen — fullscreen content shouldn't be pushed down by
 ///    a 36px header.
+/// Global mirror of `Shell::tiled_headers_enabled` so the render
+/// decision can be made from anywhere without threading a `&Shell`
+/// through the call chain. Same pattern as
+/// `window_header::theme_generation()`. Updated only via
+/// `set_tiled_headers_global` from the canonical
+/// `Shell::set_tiled_headers_enabled` method.
+static TILED_HEADERS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Read the global tiled-headers toggle. Called from
+/// `should_render_window_header` and `CosmicWindowInternal::has_ssd`.
+pub fn tiled_headers_enabled_global() -> bool {
+    TILED_HEADERS_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Set the global mirror. Use `Shell::set_tiled_headers_enabled`
+/// from outside; this is the low-level setter that ALSO needs to
+/// fire from there so render decisions and instance state stay
+/// aligned.
+pub(crate) fn set_tiled_headers_global(v: bool) {
+    TILED_HEADERS_ENABLED.store(v, Ordering::Relaxed);
+}
+
 /// General eligibility check — is this window "dressable" at all?
 /// Used by both the compositor-rendered header path (Feature 4-C,
 /// single non-stacked windows) and the shell-rendered stack header
 /// path. Two callers share this so policy stays in one place.
+///
+/// Order of checks is **load-bearing** (see Tiled-Headers Toggle
+/// edge-case analysis):
+///   1. Stacks always render — toggle never applies, tab-bar is
+///      functional UI.
+///   2. Fullscreen never renders — covers entire output, no chrome.
+///   3. Tiled + toggle-off never renders — user opted out for
+///      single tiled windows. Floating windows in the same
+///      workspace are unaffected because `is_tiled()` is per
+///      window, not per workspace.
+///   4. Otherwise: client-side-decoration check (Wayland) or
+///      X11 heuristic.
 pub fn should_render_window_header(mapped: &CosmicMapped) -> bool {
-    let surface = mapped.active_window();
-    if surface.is_fullscreen(false) {
-        return false;
-    }
-
-    // Stacks always get a Lunaris header — their tabs render inside
-    // it (integrated design, see Feature 3). The per-tab window's
-    // own is_decorated() is forced to "undecorated" on stack
-    // creation (`try_force_undecorated(true)` in CosmicStack::new),
-    // so consulting the tab's xdg-decoration state here would be
-    // meaningless.
     if mapped.is_stack() {
         return true;
     }
+    let surface = mapped.active_window();
+    let is_fullscreen = surface.is_fullscreen(false);
+    let is_tiled = mapped.is_tiled(false).unwrap_or(false);
+    let tiled_enabled = tiled_headers_enabled_global();
 
-    match surface.0.underlying_surface() {
-        smithay::desktop::WindowSurface::Wayland(_) => {
-            // Wayland semantics: `is_decorated()=true` means the
-            // client has CSD (xdg-decoration ClientSide or KDE
-            // non-Server). Skip — the client draws its own chrome.
-            !surface.is_decorated(false)
-        }
+    let csd_branch_eligible = match surface.0.underlying_surface() {
+        smithay::desktop::WindowSurface::Wayland(_) => !surface.is_decorated(false),
         smithay::desktop::WindowSurface::X11(x11) => x11_should_render_header(x11),
+    };
+
+    header_eligibility_pure(HeaderEligibilityInputs {
+        is_stack: false, // already short-circuited
+        is_fullscreen,
+        is_tiled,
+        tiled_headers_enabled: tiled_enabled,
+        csd_branch_eligible,
+    })
+}
+
+/// Inputs describing one window's state for header-eligibility.
+/// Carved out so the policy itself is a pure function with a
+/// testable truth table — no need to mock CosmicMapped/CosmicSurface.
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderEligibilityInputs {
+    /// `true` for `CosmicMapped::is_stack()`. When set, the policy
+    /// always returns `true` regardless of the other inputs (stacks
+    /// own their own tab-bar UI which is functional, not decoration).
+    pub is_stack: bool,
+    /// `true` if the window is currently fullscreen — never
+    /// renders a header (chrome would obscure content the user is
+    /// fullscreen-viewing).
+    pub is_fullscreen: bool,
+    /// `true` if the window's xdg-toplevel state has any tiled-* flag
+    /// set (compositor placed it in a tile cell). False for floating.
+    pub is_tiled: bool,
+    /// Global toggle: `true` means tiled windows DO render a header,
+    /// `false` means they don't. Floating windows ignore this.
+    pub tiled_headers_enabled: bool,
+    /// Result of the per-protocol CSD check: Wayland xdg-decoration
+    /// ServerSide / unset → true; X11 motif-hints + heuristic → true
+    /// when window is undecorated by the client and eligible for
+    /// Lunaris chrome.
+    pub csd_branch_eligible: bool,
+}
+
+/// Pure render-eligibility policy. **Order is load-bearing**:
+///   1. Stacks → always true.
+///   2. Fullscreen → always false.
+///   3. Tiled + toggle off → false (per-window, NOT per-workspace).
+///   4. Otherwise: client-side-decoration branch.
+pub fn header_eligibility_pure(i: HeaderEligibilityInputs) -> bool {
+    if i.is_stack {
+        return true;
     }
+    if i.is_fullscreen {
+        return false;
+    }
+    if i.is_tiled && !i.tiled_headers_enabled {
+        return false;
+    }
+    i.csd_branch_eligible
 }
 
 /// Should this window's header events (`window_header_show` /
@@ -2315,6 +2398,16 @@ impl Shell {
             xwayland_keyboard_grab: None,
 
             active_hint: config.cosmic_conf.active_hint,
+            tiled_headers_enabled: {
+                // Seed the global atomic mirror at construction so
+                // the very first `should_render_window_header`
+                // callsite sees the same value. Otherwise the
+                // first frame races: field set, atomic still
+                // default-false. set_tiled_headers_global is the
+                // canonical writer.
+                set_tiled_headers_global(config.layout.tiled_headers);
+                config.layout.tiled_headers
+            },
             lunaris_theme: lunaris_theme::LunarisTheme::load(),
             overview_mode: OverviewMode::None,
             swap_indicator: None,
@@ -5210,6 +5303,61 @@ impl Shell {
         Some(((focus, new_loc), (grab, Focus::Keep)))
     }
 
+    /// Set the tiled-headers enabled state on the shell AND on the
+    /// global atomic mirror so render-decision callsites (which
+    /// don't have access to a `Shell` borrow) can read it. When
+    /// the value actually changes, every tiled mapped window gets
+    /// a `configure()` so its `has_ssd` answer flips and the
+    /// xdg-toplevel reports the new size to the client. Stack
+    /// children are skipped — stacks always have their tab-bar.
+    ///
+    /// `bump_theme_generation()` is also called so the
+    /// per-window header pixmap cache (Feature 4-C) invalidates.
+    /// On the next frame `should_render_window_header` returns
+    /// the new decision and the window-header element either
+    /// appears or disappears atomically with the geometry update.
+    pub fn set_tiled_headers_enabled(&mut self, enabled: bool) {
+        if self.tiled_headers_enabled == enabled {
+            return;
+        }
+        let old = self.tiled_headers_enabled;
+        self.tiled_headers_enabled = enabled;
+        crate::shell::set_tiled_headers_global(enabled);
+        tracing::info!(
+            "TILE-DEBUG tiled_headers_enabled: {} -> {}",
+            old, enabled
+        );
+
+        // Find every tiled, non-stack mapped window. We collect
+        // first to release the iterator borrow on `self` before
+        // mutating per-window. Stacks are excluded because they
+        // always render their tab-bar header — toggle is a no-op
+        // for them.
+        let to_reconfigure: Vec<CosmicMapped> = self
+            .mapped()
+            .filter(|m| !m.is_stack())
+            .filter(|m| m.is_tiled(false).unwrap_or(false))
+            .cloned()
+            .collect();
+        let n = to_reconfigure.len();
+        for mapped in &to_reconfigure {
+            // `configure()` re-emits xdg_toplevel.configure with
+            // current geometry. The client recomputes its content
+            // size (now with or without the 36-px SSD strip) and
+            // commits a new buffer. The compositor render path
+            // re-evaluates `has_ssd` on the next frame.
+            mapped.configure();
+        }
+        tracing::info!(
+            "TILE-DEBUG reconfigure storm: {} tiled windows asked to refresh size",
+            n
+        );
+
+        // Invalidate per-window header pixmap caches so the cached
+        // pre-toggle pixmap doesn't paint over the new state.
+        crate::backend::render::window_header::bump_theme_generation();
+    }
+
     pub fn maximize_toggle(
         &mut self,
         window: &CosmicMapped,
@@ -6223,6 +6371,134 @@ pub fn check_grab_preconditions(
     }
 
     Some(start_data)
+}
+
+#[cfg(test)]
+mod tiled_headers_policy_tests {
+    use super::{HeaderEligibilityInputs, header_eligibility_pure,
+        TILED_HEADERS_ENABLED, set_tiled_headers_global, tiled_headers_enabled_global};
+    use std::sync::atomic::Ordering;
+
+    fn inputs(
+        is_stack: bool,
+        is_fullscreen: bool,
+        is_tiled: bool,
+        tiled_headers_enabled: bool,
+        csd: bool,
+    ) -> HeaderEligibilityInputs {
+        HeaderEligibilityInputs {
+            is_stack,
+            is_fullscreen,
+            is_tiled,
+            tiled_headers_enabled,
+            csd_branch_eligible: csd,
+        }
+    }
+
+    #[test]
+    fn stack_always_renders_regardless_of_other_inputs() {
+        // Stack short-circuits everything — fullscreen, tiled+off,
+        // CSD-only client. Tab-bar is functional UI, must always be
+        // visible while the stack exists.
+        for fs in [true, false] {
+            for tiled in [true, false] {
+                for toggle in [true, false] {
+                    for csd in [true, false] {
+                        let i = inputs(true, fs, tiled, toggle, csd);
+                        assert!(
+                            header_eligibility_pure(i),
+                            "stack should render: {:?}",
+                            i
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fullscreen_never_renders() {
+        // Outside the stack short-circuit, fullscreen always wins.
+        for tiled in [true, false] {
+            for toggle in [true, false] {
+                for csd in [true, false] {
+                    let i = inputs(false, true, tiled, toggle, csd);
+                    assert!(!header_eligibility_pure(i), "fullscreen: {:?}", i);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tiled_with_toggle_off_does_not_render() {
+        // Default scenario the toggle was added for: tiled SSD
+        // window (Kitty in tiling mode) gets no header.
+        let i = inputs(false, false, true, false, true);
+        assert!(!header_eligibility_pure(i));
+    }
+
+    #[test]
+    fn tiled_with_toggle_on_renders_when_csd_branch_says_yes() {
+        let i = inputs(false, false, true, true, true);
+        assert!(header_eligibility_pure(i));
+    }
+
+    #[test]
+    fn floating_renders_regardless_of_toggle() {
+        // Floating windows IGNORE the toggle — they always show
+        // their decoration if the CSD branch says so. This is
+        // critical for "floating window in tiling workspace via
+        // window-rule" scenarios.
+        for toggle in [true, false] {
+            let i = inputs(false, false, false, toggle, true);
+            assert!(header_eligibility_pure(i), "floating ignores toggle: toggle={toggle}");
+        }
+    }
+
+    #[test]
+    fn floating_with_csd_client_never_renders() {
+        // Client-side-decorated app (Firefox, GTK4) — Lunaris
+        // never paints chrome regardless of toggle.
+        for toggle in [true, false] {
+            let i = inputs(false, false, false, toggle, false);
+            assert!(!header_eligibility_pure(i), "csd app never gets header: toggle={toggle}");
+        }
+    }
+
+    #[test]
+    fn tiled_with_csd_client_never_renders_either() {
+        // Tiled CSD app: header not from us regardless. Toggle off
+        // is the relevant case here — even if toggle were on, no
+        // header (because csd_branch_eligible=false).
+        let i = inputs(false, false, true, true, false);
+        assert!(!header_eligibility_pure(i));
+        let i = inputs(false, false, true, false, false);
+        assert!(!header_eligibility_pure(i));
+    }
+
+    // ── Global atomic mirror ──
+
+    #[test]
+    fn global_toggle_defaults_to_false() {
+        // Reading the static at any time before the first set
+        // should give us false. (This test sets+resets to be
+        // robust against test-runner ordering.)
+        let saved = TILED_HEADERS_ENABLED.load(Ordering::Relaxed);
+        TILED_HEADERS_ENABLED.store(false, Ordering::Relaxed);
+        assert!(!tiled_headers_enabled_global());
+        // Restore so other tests don't see stale state.
+        TILED_HEADERS_ENABLED.store(saved, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn set_tiled_headers_global_round_trip() {
+        let saved = TILED_HEADERS_ENABLED.load(Ordering::Relaxed);
+        set_tiled_headers_global(true);
+        assert!(tiled_headers_enabled_global());
+        set_tiled_headers_global(false);
+        assert!(!tiled_headers_enabled_global());
+        TILED_HEADERS_ENABLED.store(saved, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

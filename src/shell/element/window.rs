@@ -223,9 +223,32 @@ impl CosmicWindowInternal {
         unsafe { Focus::from_u8(self.pointer_entered.load(Ordering::SeqCst)) }
     }
 
-    /// Returns if the window has any current or pending server-side decorations.
+    /// Returns if the window has any current or pending server-side
+    /// decorations. The 36-px `SSD_HEIGHT` strip the compositor
+    /// reserves at the top of the window's geometry is gated on this
+    /// — so flipping `has_ssd` from true to false reclaims those
+    /// pixels for window content. The strip is the painted area for
+    /// `CosmicWindow::header_render_element`, also gated on this.
+    ///
+    /// Tiled-Headers toggle (Feature: tiled_headers): even when the
+    /// window WANTS server-side decorations (e.g. Kitty requests
+    /// `ServerSide` via xdg-decoration), if the user has disabled
+    /// headers for tiled windows AND this window is currently
+    /// tiled, we report `has_ssd=false`. The geometry-update
+    /// pipeline (xdg_toplevel.configure) then reflows the client to
+    /// fill the reclaimed strip.
     pub fn has_ssd(&self, pending: bool) -> bool {
-        !self.window.is_decorated(pending)
+        if self.window.is_decorated(pending) {
+            return false;
+        }
+        // CSD-tracking says we should have a Lunaris header. Now the
+        // tiled-toggle override:
+        if self.has_tiled_state()
+            && !crate::shell::tiled_headers_enabled_global()
+        {
+            return false;
+        }
+        true
     }
 
     /// Returns if the window is currently tiled.

@@ -649,23 +649,37 @@ fn draw_buttons(
 
 /// Pick the (background, icon, scale) visual triple for a button
 /// based on its interaction state. Matches the canonical
-/// `WindowControls.svelte` in `sdk/ui-kit` field-for-field:
+/// `WindowControls.svelte` shipped in `app-settings` (which is
+/// the visible reference the user compares against side-by-side
+/// with the compositor-rendered header) **field-for-field**:
 ///
 /// ```css
-/// .control-btn              { opacity: 0.7 }
-/// .control-btn:hover        { opacity: 1; transform: scale(1.1);
-///                             background: color-mix(fg 10%, transparent); }
-/// .control-btn:active       { transform: scale(0.9) }
-/// .close-btn:hover          { background: var(--destructive);
-///                             color: #ffffff }
+/// .control-btn          { opacity: 0.7;
+///                         transition: opacity var(--duration-fast)
+///                                     var(--easing-default); }
+/// .control-btn:hover    { opacity: 1; }                /* NOTHING ELSE */
+/// .close-btn:hover      { background: var(--destructive);
+///                         color: #ffffff; }
 /// ```
 ///
-/// The `opacity` is applied to both bg alpha AND the icon colour
-/// so the whole button dims together. When the parent window is
-/// inactive we dim further (`BUTTON_IDLE_OPACITY_INACTIVE`) to make
-/// focus state obvious — WindowControls.svelte doesn't handle this
-/// case because it's rendered inside the app's own window where
-/// focus state isn't ambiguous.
+/// Notably, the canonical decoration buttons have:
+///  * NO hover-bg tint on non-close buttons (only opacity changes).
+///  * NO scale on hover.
+///  * NO scale on press.
+///
+/// An older variant of `WindowControls.svelte` in `desktop-shell`
+/// has scale(1.1) on hover, scale(0.9) on press, and a 10 %
+/// foreground bg-tint on hover — those were a brief experiment
+/// that never made it back into the canonical version. The
+/// compositor used to mirror that experimental variant; this
+/// function now matches the pared-back canonical look so the
+/// app-settings decorations and the compositor-rendered Kitty
+/// decorations animate identically.
+///
+/// Inactive-window dimming (`BUTTON_IDLE_OPACITY_INACTIVE`) stays
+/// — that's a compositor-specific extension because
+/// WindowControls.svelte never lives outside its own focused
+/// app window.
 fn button_visual(
     button: HeaderButton,
     state: &HeaderVisualState,
@@ -673,16 +687,17 @@ fn button_visual(
 ) -> (Rgba, Rgba, f32) {
     let is_close = button == HeaderButton::Close;
 
-    let (hovered, pressed) = match state.interaction {
+    let (hovered, _pressed) = match state.interaction {
         ButtonInteraction::Hover(b) if b == button => (true, false),
         ButtonInteraction::Pressed(b) if b == button => (true, true),
         _ => (false, false),
     };
 
-    // Effective "button opacity" — WindowControls.svelte:
-    //   idle  → 0.7  (or lower when window unfocused)
-    //   hover → 1.0  (on focused window)
-    //   hover on unfocused window → bump back to focused-idle
+    // Effective "button opacity":
+    //   activated + idle  → 0.7   (matches WindowControls.svelte)
+    //   activated + hover → 1.0
+    //   inactive  + idle  → 0.4   (compositor-only extension)
+    //   inactive  + hover → 0.7
     let button_opacity = if hovered {
         if state.activated { 1.0 } else { BUTTON_IDLE_OPACITY }
     } else if state.activated {
@@ -691,26 +706,14 @@ fn button_visual(
         BUTTON_IDLE_OPACITY_INACTIVE
     };
 
-    // Background — pre-opacity. Close-hover has special treatment.
-    let bg_raw = if hovered {
-        if is_close {
-            // `.close-btn:hover { background: var(--destructive) }`
-            // — FULL OPAQUE destructive (no alpha mix). This is a
-            //   clear "you are about to close" signal, not a soft
-            //   tint. The old renderer mixed at 80 % alpha which
-            //   came from a stale version of WindowHeader.svelte;
-            //   the canonical WindowControls is full-opaque.
-            theme.error
-        } else {
-            // `.control-btn:hover { background:
-            //   color-mix(in srgb, var(--foreground) 10%, transparent) }`
-            mix(theme.fg_primary, TRANSPARENT, 0.10)
-        }
+    // Background — pre-opacity. Non-close hover stays transparent
+    // (no tint). Close-hover lights up the full destructive
+    // colour, no alpha attenuation other than `button_opacity`.
+    let bg_raw = if hovered && is_close {
+        theme.error
     } else {
         TRANSPARENT
     };
-    // Apply button_opacity to the BG alpha so the whole button
-    // dims uniformly with its icon.
     let mut bg = bg_raw;
     bg[3] *= button_opacity;
 
@@ -719,19 +722,16 @@ fn button_visual(
     let icon_raw = if hovered && is_close {
         [1.0, 1.0, 1.0, 1.0]
     } else {
-        // Use fg_primary at full RGB; opacity handles the dimming.
         theme.fg_primary
     };
     let mut icon_color = icon_raw;
     icon_color[3] *= button_opacity;
 
-    let scale = if pressed {
-        0.9
-    } else if hovered {
-        1.1
-    } else {
-        1.0
-    };
+    // Scale = 1.0 always. The canonical `WindowControls.svelte`
+    // does NOT animate scale; only opacity. Keep this as a triple
+    // return so callers stay shape-stable if a future variant
+    // wants to bring scale back.
+    let scale = 1.0;
 
     (bg, icon_color, scale)
 }
@@ -974,7 +974,9 @@ mod tests {
         assert!((bg[3] - 1.0).abs() < 0.001, "A should be full, got {}", bg[3]);
         // Icon pure white at full alpha on activated window.
         assert_eq!(icon, [1.0, 1.0, 1.0, 1.0]);
-        assert!((scale - 1.1).abs() < 0.001);
+        // Canonical app-settings WindowControls has NO scale on
+        // hover or active. Stay at 1.0.
+        assert!((scale - 1.0).abs() < 0.001, "no hover scale, got {}", scale);
     }
 
     #[test]
@@ -997,14 +999,44 @@ mod tests {
     }
 
     #[test]
-    fn button_visual_pressed_shrinks() {
-        let state = HeaderVisualState {
+    fn button_visual_no_scale_animation() {
+        // Canonical WindowControls has no transform animation —
+        // verify all states stay at scale 1.0 so the compositor
+        // doesn't reintroduce the bouncy scale-on-press feel.
+        let theme = LunarisTheme::lunaris_dark();
+
+        let idle = stub_state(800, true);
+        let (_, _, s_idle) = button_visual(HeaderButton::Minimize, &idle, &theme);
+        assert!((s_idle - 1.0).abs() < 0.001);
+
+        let hover = HeaderVisualState {
+            interaction: ButtonInteraction::Hover(HeaderButton::Minimize),
+            ..idle.clone()
+        };
+        let (_, _, s_hover) = button_visual(HeaderButton::Minimize, &hover, &theme);
+        assert!((s_hover - 1.0).abs() < 0.001);
+
+        let pressed = HeaderVisualState {
             interaction: ButtonInteraction::Pressed(HeaderButton::Minimize),
+            ..idle
+        };
+        let (_, _, s_press) = button_visual(HeaderButton::Minimize, &pressed, &theme);
+        assert!((s_press - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn button_visual_no_hover_bg_for_non_close() {
+        // Non-close hover keeps bg transparent — only opacity
+        // changes. This is the visible difference vs the older
+        // desktop-shell variant that mixed a 10 % foreground tint.
+        let theme = LunarisTheme::lunaris_dark();
+        let hover = HeaderVisualState {
+            interaction: ButtonInteraction::Hover(HeaderButton::Minimize),
             ..stub_state(800, true)
         };
-        let theme = LunarisTheme::panda();
-        let (_, _, scale) = button_visual(HeaderButton::Minimize, &state, &theme);
-        assert!((scale - 0.9).abs() < 0.001);
+        let (bg, _, _) = button_visual(HeaderButton::Minimize, &hover, &theme);
+        // Pre-multiplied alpha == 0 → background fully transparent.
+        assert!(bg[3] < 1e-5, "non-close hover should not paint bg, got alpha {}", bg[3]);
     }
 
     #[test]

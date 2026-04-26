@@ -51,9 +51,7 @@ use cosmic_comp_config::{
         AccelConfig, DeviceState as InputDeviceState, InputConfig, ScrollConfig, TapConfig,
         TouchpadOverride,
     },
-    output::comp::{
-        OutputConfig, OutputInfo, OutputState, OutputsConfig, TransformDef, load_outputs,
-    },
+    output::comp::{OutputConfig, OutputInfo, OutputState, OutputsConfig, TransformDef},
 };
 pub use key_bindings::{Action, PrivateAction, action_from_str, keysym_from_str};
 use types::WlXkbConfig;
@@ -307,6 +305,22 @@ pub fn parse_keybinding(binding: &str) -> Option<(KeyBindingModifiers, String)> 
 
 /// Default TOML config path.
 const DEFAULT_TOML_PATH: &str = ".config/lunaris/compositor.toml";
+
+/// Display profile config (output management) lives in a dedicated
+/// file under `compositor.d/` so the compositor can rewrite it on
+/// every applied output change without disturbing the user-edited
+/// `compositor.toml`. See `docs/architecture/display-system.md` §A1.
+const DISPLAYS_TOML_PATH: &str = ".config/lunaris/compositor.d/displays.toml";
+
+/// Resolve the absolute path of the displays-config TOML, or `None`
+/// if `$HOME` is unset (which only happens in degenerate test rigs).
+pub fn displays_toml_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        let mut p = std::path::PathBuf::from(home);
+        p.push(DISPLAYS_TOML_PATH);
+        p
+    })
+}
 
 /// Drop-in directory for keybinding fragments written by `installd`
 /// on module install. One `*.toml` file per module, each a flat
@@ -1019,8 +1033,29 @@ impl Config {
     }
 
     fn load_dynamic(xdg: &xdg::BaseDirectories) -> DynamicConfig {
-        let output_path = xdg.place_state_file("cosmic-comp/outputs.ron").ok();
-        let outputs = load_outputs(output_path.as_ref());
+        // Output config moved from `~/.local/state/cosmic-comp/outputs.ron`
+        // to `~/.config/lunaris/compositor.d/displays.toml`. See
+        // `docs/architecture/display-system.md` §A1. On first boot
+        // after the change, the legacy RON is converted to TOML and
+        // unlinked. The legacy path keeps working for `numlock` and
+        // `a11y_screen_filter` because those are dev-time state with
+        // no settings UI yet.
+        let displays_path = displays_toml_path();
+        if let Some(toml_path) = displays_path.as_ref() {
+            if let Ok(legacy_ron) = xdg.place_state_file("cosmic-comp/outputs.ron") {
+                cosmic_comp_config::output::displays_toml::migrate_from_ron(
+                    &legacy_ron,
+                    toml_path,
+                );
+            }
+        }
+        let outputs = displays_path
+            .as_deref()
+            .map(cosmic_comp_config::output::displays_toml::load)
+            .unwrap_or_else(|| OutputsConfig {
+                config: Default::default(),
+            });
+
         let numlock_path = xdg.place_state_file("cosmic-comp/numlock.ron").ok();
         let numlock = Self::load_numlock(&numlock_path);
 
@@ -1030,7 +1065,7 @@ impl Config {
         let filter = Self::load_filter_state(&filter_path);
 
         DynamicConfig {
-            outputs: (output_path, outputs),
+            outputs: (displays_path, outputs),
             numlock: (numlock_path, numlock),
             accessibility_filter: (filter_path, filter),
         }
@@ -1417,49 +1452,96 @@ impl Config {
     }
 }
 
-pub struct PersistenceGuard<'a, T: Serialize>(Option<PathBuf>, &'a mut T);
+/// Per-type serializer callback. The original `PersistenceGuard`
+/// hardcoded RON for everything; with `outputs.ron` migrating to
+/// TOML the format now varies per dynamic-state file. The callback
+/// closes over the value and produces the on-disk text.
+type Serializer<T> = fn(&T) -> Result<String, String>;
+
+fn ron_serialize<T: Serialize>(value: &T) -> Result<String, String> {
+    ron::ser::to_string_pretty(value, Default::default()).map_err(|e| e.to_string())
+}
+
+fn outputs_toml_serialize(value: &OutputsConfig) -> Result<String, String> {
+    cosmic_comp_config::output::displays_toml::to_toml_string(value)
+}
+
+pub struct PersistenceGuard<'a, T: Serialize> {
+    path: Option<PathBuf>,
+    value: &'a mut T,
+    serialize: Serializer<T>,
+}
 
 impl<T: Serialize> std::ops::Deref for PersistenceGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        self.1
+        self.value
     }
 }
 
 impl<T: Serialize> std::ops::DerefMut for PersistenceGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        self.1
+        self.value
     }
 }
 
 impl<T: Serialize> Drop for PersistenceGuard<'_, T> {
     fn drop(&mut self) {
-        if let Some(path) = self.0.as_ref() {
-            let content = match ron::ser::to_string_pretty(&self.1, Default::default()) {
+        if let Some(path) = self.path.as_ref() {
+            let content = match (self.serialize)(self.value) {
                 Ok(content) => content,
                 Err(err) => {
-                    warn!("Failed to serialize: {:?}", err);
+                    warn!("Failed to serialize: {err}");
                     return;
                 }
             };
 
-            let mut writer = match OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(path)
-            {
-                Ok(writer) => writer,
-                Err(err) => {
-                    warn!(?err, "Failed to persist {}.", path.display());
-                    return;
-                }
+            // Make sure the parent directory exists. The TOML
+            // outputs path lives under `~/.config/lunaris/compositor.d/`
+            // which has no other guaranteed creator.
+            let Some(parent) = path.parent() else {
+                warn!("PersistenceGuard target path has no parent: {}", path.display());
+                return;
             };
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                warn!(?err, "Failed to create parent dir for {}", path.display());
+                return;
+            }
 
-            if let Err(err) = writer.write_all(content.as_bytes()) {
-                warn!(?err, "Failed to persist {}", path.display());
-            } else {
-                let _ = writer.flush();
+            // Atomic write: write to `<file>.tmp`, fsync, rename over
+            // the target. Without this a process kill between
+            // truncate and write_all leaves the file half-formed —
+            // and for `outputs`, that file is the only authoritative
+            // copy of the user's display layout.
+            let tmp_path = path.with_extension(
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| format!("{e}.tmp"))
+                    .unwrap_or_else(|| "tmp".into()),
+            );
+            let write_result = (|| -> std::io::Result<()> {
+                let mut writer = OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&tmp_path)?;
+                writer.write_all(content.as_bytes())?;
+                writer.flush()?;
+                writer.sync_all()?;
+                std::fs::rename(&tmp_path, path)?;
+                Ok(())
+            })();
+
+            if let Err(err) = write_result {
+                warn!(?err, "Failed to persist {} atomically.", path.display());
+                let _ = std::fs::remove_file(&tmp_path);
+                return;
+            }
+
+            // Best-effort directory fsync so the rename itself is
+            // durable. Failure is non-fatal.
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
             }
         }
     }
@@ -1471,7 +1553,11 @@ impl DynamicConfig {
     }
 
     pub fn outputs_mut(&mut self) -> PersistenceGuard<'_, OutputsConfig> {
-        PersistenceGuard(self.outputs.0.clone(), &mut self.outputs.1)
+        PersistenceGuard {
+            path: self.outputs.0.clone(),
+            value: &mut self.outputs.1,
+            serialize: outputs_toml_serialize,
+        }
     }
 
     pub fn numlock(&self) -> &NumlockStateConfig {
@@ -1479,7 +1565,11 @@ impl DynamicConfig {
     }
 
     pub fn numlock_mut(&mut self) -> PersistenceGuard<'_, NumlockStateConfig> {
-        PersistenceGuard(self.numlock.0.clone(), &mut self.numlock.1)
+        PersistenceGuard {
+            path: self.numlock.0.clone(),
+            value: &mut self.numlock.1,
+            serialize: ron_serialize,
+        }
     }
 
     pub fn screen_filter(&self) -> &ScreenFilter {
@@ -1487,10 +1577,11 @@ impl DynamicConfig {
     }
 
     pub fn screen_filter_mut(&mut self) -> PersistenceGuard<'_, ScreenFilter> {
-        PersistenceGuard(
-            self.accessibility_filter.0.clone(),
-            &mut self.accessibility_filter.1,
-        )
+        PersistenceGuard {
+            path: self.accessibility_filter.0.clone(),
+            value: &mut self.accessibility_filter.1,
+            serialize: ron_serialize,
+        }
     }
 }
 

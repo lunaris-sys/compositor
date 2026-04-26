@@ -788,6 +788,8 @@ dependencies = [
  "libdisplay-info",
  "ron 0.12.0",
  "serde",
+ "tempfile",
+ "toml 0.8.23",
  "tracing",
 ]
 

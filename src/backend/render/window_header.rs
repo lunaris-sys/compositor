@@ -706,11 +706,23 @@ fn button_visual(
         BUTTON_IDLE_OPACITY_INACTIVE
     };
 
-    // Background — pre-opacity. Non-close hover stays transparent
-    // (no tint). Close-hover lights up the full destructive
-    // colour, no alpha attenuation other than `button_opacity`.
+    // Background — pre-opacity.
+    //   close + hover     → full destructive colour
+    //   non-close + hover → 10 % foreground tint, mirroring the
+    //     `color-mix(var(--color-fg-shell), 10%)` pattern that
+    //     the canonical `WindowControls.svelte` now uses (and
+    //     that every other shell hover state — Quick-Settings,
+    //     ContextMenu, popovers — already follows). Without it
+    //     the hover effect was opacity-only on a 0.7-baseline
+    //     icon, which reads as "almost no change" against busy
+    //     app backgrounds.
+    //   non-hover         → transparent
     let bg_raw = if hovered && is_close {
         theme.error
+    } else if hovered {
+        let mut tint = theme.fg_primary;
+        tint[3] = 0.10;
+        tint
     } else {
         TRANSPARENT
     };

@@ -242,8 +242,15 @@ impl CosmicWindowInternal {
             return false;
         }
         // CSD-tracking says we should have a Lunaris header. Now the
-        // tiled-toggle override:
-        if self.has_tiled_state()
+        // tiled-toggle override applies only when the window is
+        // actually placed in the tiling layer — `is_tiled` reads the
+        // workspace-level placement flag. The xdg-toplevel tiled
+        // state (`has_tiled_state`) is unreliable here because the
+        // compositor sets it on floating windows too when
+        // `clip_floating_windows` is enabled (rectangular clipping
+        // intent), which would otherwise incorrectly suppress the
+        // SSD reservation on floating SSD apps when the toggle is off.
+        if self.is_tiled()
             && !crate::shell::tiled_headers_enabled_global()
         {
             return false;
@@ -948,6 +955,20 @@ impl CosmicWindow {
         if !p.appearance_conf.lock().unwrap().clip_floating_windows {
             p.window.set_tiled(tiled);
         }
+    }
+
+    /// Whether this window is currently placed in the workspace's
+    /// tiling layer.
+    ///
+    /// Mirrors `CosmicWindowInternal::is_tiled` through the shared
+    /// mutex. **Distinct from** the xdg-toplevel tiled state which
+    /// `clip_floating_windows` sets on floating windows for clipping
+    /// intent. Callers asking "should this window participate in tile
+    /// behaviour" should use this; callers asking "what tiled-state
+    /// flag has the client been told over the wire" should use
+    /// `surface().is_tiled(pending)`.
+    pub fn is_tiled(&self) -> bool {
+        self.p().is_tiled()
     }
 
     /// Compute the corner radii for this window given geometry and defaults.

@@ -554,6 +554,16 @@ impl CosmicStack {
         p.tiled.store(tiled, Ordering::Release);
     }
 
+    /// Whether this stack is currently in the workspace's tiling layer.
+    ///
+    /// This is the workspace-level placement flag, written by
+    /// [`Workspace::set_tiled`]. Distinct from any xdg-toplevel tiled
+    /// state which the compositor may set on individual stacked windows
+    /// for clipping intent regardless of placement.
+    pub fn is_tiled(&self) -> bool {
+        self.p().tiled.load(Ordering::Acquire)
+    }
+
     pub fn surfaces(&self) -> impl Iterator<Item = CosmicSurface> {
         let p = self.p();
         p.windows

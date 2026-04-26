@@ -2055,7 +2055,12 @@ pub fn should_render_window_header(mapped: &CosmicMapped) -> bool {
     }
     let surface = mapped.active_window();
     let is_fullscreen = surface.is_fullscreen(false);
-    let is_tiled = mapped.is_tiled(false).unwrap_or(false);
+    // Workspace-level placement flag, NOT the xdg-toplevel tiled state.
+    // The latter is set on floating windows too when
+    // `clip_floating_windows` is enabled (rectangular clipping intent),
+    // so reading it here would suppress floating SSD windows' headers
+    // whenever the user toggles `tiled_headers` off.
+    let is_tiled = mapped.is_in_tiling_layer();
     let tiled_enabled = tiled_headers_enabled_global();
 
     let csd_branch_eligible = match surface.0.underlying_surface() {
@@ -2085,8 +2090,13 @@ pub struct HeaderEligibilityInputs {
     /// renders a header (chrome would obscure content the user is
     /// fullscreen-viewing).
     pub is_fullscreen: bool,
-    /// `true` if the window's xdg-toplevel state has any tiled-* flag
-    /// set (compositor placed it in a tile cell). False for floating.
+    /// `true` if the window is currently placed in the workspace's
+    /// tiling layer. False for floating. **Not** the xdg-toplevel
+    /// tiled state — that flag is also set on floating windows when
+    /// `clip_floating_windows` is enabled (clipping intent), so
+    /// reading it here would suppress floating SSD windows' headers
+    /// when the user toggles `tiled_headers` off. Use
+    /// `CosmicMapped::is_in_tiling_layer()` to populate this.
     pub is_tiled: bool,
     /// Global toggle: `true` means tiled windows DO render a header,
     /// `false` means they don't. Floating windows ignore this.
@@ -5333,10 +5343,14 @@ impl Shell {
         // mutating per-window. Stacks are excluded because they
         // always render their tab-bar header — toggle is a no-op
         // for them.
+        // Reconfigure windows actually placed in a tiling layer —
+        // floating windows are unaffected by the toggle (their header
+        // is gated by CSD only), so reconfiguring them would just
+        // cause an unnecessary buffer churn.
         let to_reconfigure: Vec<CosmicMapped> = self
             .mapped()
             .filter(|m| !m.is_stack())
-            .filter(|m| m.is_tiled(false).unwrap_or(false))
+            .filter(|m| m.is_in_tiling_layer())
             .cloned()
             .collect();
         let n = to_reconfigure.len();

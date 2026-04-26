@@ -328,6 +328,24 @@ impl CosmicMapped {
         window.is_tiled(pending)
     }
 
+    /// Whether this window is currently placed in the workspace's tiling
+    /// layer (as opposed to floating).
+    ///
+    /// This reads the workspace-level placement flag written by
+    /// [`Self::set_tiled`]. It is **not** the xdg-toplevel `tiled` state,
+    /// which the compositor may also set on floating windows for
+    /// rectangular clipping intent (see `clip_floating_windows`). Use
+    /// this method when the question is "is this in the tiling layer";
+    /// use `is_tiled(pending)` when the question is "what tiled-state
+    /// flags has the client been told about over the wire".
+    pub fn is_in_tiling_layer(&self) -> bool {
+        match &self.element {
+            CosmicMappedInternal::Stack(s) => s.is_tiled(),
+            CosmicMappedInternal::Window(w) => w.is_tiled(),
+            _ => unreachable!(),
+        }
+    }
+
     pub fn set_fullscreen(&self, fullscreen: bool) {
         for window in match &self.element {
             CosmicMappedInternal::Stack(s) => {

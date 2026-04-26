@@ -148,3 +148,72 @@ message FocusDeactivatedPayload {
   string project_id      = 1;
   uint64 duration_seconds = 2;  // how long focus was active
 }
+
+// ── Shell SDK Events (first-party app surface) ──────────────────────────
+// Emitted by first-party apps via os-sdk's `shell.*` namespace. The
+// Knowledge Daemon promotes them into UserAction nodes; metadata stays
+// in the SQLite event log so the graph stays lightweight.
+
+// Emitted when an app calls `shell.presence.set`. Describes the user's
+// current ephemeral activity. Auto-clear is enforced client-side: the
+// SDK wires a window-blur listener that emits PresenceClearPayload
+// when the app loses focus.
+// Event type: "app.presence.set"
+message PresenceSetPayload {
+  string app_id    = 1;  // emitting app
+  string activity  = 2;  // "editing" | "reading" | "reviewing" | "building" | custom
+  string subject   = 3;  // free-form, typically a file path or document name
+  string project   = 4;  // optional; inherits Focus Mode if empty
+  string auto_clear = 5; // "" | "on-blur" | "on-idle"
+  map<string, string> metadata = 6;  // free-form structured context
+}
+
+// Emitted when an app calls `shell.presence.clear`, or by the SDK
+// auto-clear path when the registered window-blur listener fires.
+// Event type: "app.presence.clear"
+message PresenceClearPayload {
+  string app_id = 1;
+}
+
+// Emitted when an app calls `shell.timeline.record`. Persistent
+// (point-in-time or duration) record of a completed semantic event.
+// Distinct from Presence (which is ephemeral state).
+// Event type: "app.timeline.record"
+message TimelineRecordPayload {
+  string app_id     = 1;
+  string label      = 2;  // user-facing summary, e.g. "Exported PDF"
+  string subject    = 3;  // typically a file path or project name
+  string type       = 4;  // app-defined category, e.g. "export", "build", "deploy"
+  int64  started_at = 5;  // microseconds since Unix epoch (0 for point-in-time)
+  int64  ended_at   = 6;  // microseconds since Unix epoch (0 for point-in-time)
+  map<string, string> metadata = 7;
+}
+
+// Emitted when an app calls `shell.annotations.set`. Foundation §395.
+// Apps attach structured metadata to existing graph nodes within
+// their own namespace. The Knowledge Daemon promotes this into an
+// Annotation graph node keyed by (target_type, target_id, namespace);
+// re-setting on the same triple replaces the previous value. The
+// `data_json` field is opaque app-defined JSON kept lightweight on
+// the graph node (apps that need structured queries should also write
+// to the SQLite event log via separate event types).
+// Event type: "app.annotation.set"
+message AnnotationSetPayload {
+  string app_id      = 1;  // emitting app — must match `namespace` for writes
+  string namespace   = 2;  // typically reverse-domain matching app_id
+  string target_type = 3;  // "File" | "App" | "Project" | "Session" — graph node label
+  string target_id   = 4;  // identifier appropriate for the target_type
+  string data_json   = 5;  // app-defined JSON payload, opaque to the daemon
+}
+
+// Emitted when an app calls `shell.annotations.clear`. Removes the
+// annotation matching the (target_type, target_id, namespace) triple
+// from the graph. Idempotent — clearing a missing annotation is a
+// no-op.
+// Event type: "app.annotation.cleared"
+message AnnotationClearPayload {
+  string app_id      = 1;
+  string namespace   = 2;
+  string target_type = 3;
+  string target_id   = 4;
+}

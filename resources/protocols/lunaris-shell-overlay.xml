@@ -439,6 +439,59 @@
       <entry name="close_all"            value="18" summary="close all windows in a stack"/>
     </enum>
 
+    <!-- ===== Night Light ===== -->
+
+    <enum name="night_light_schedule">
+      <description summary="when night light should be active"/>
+      <entry name="manual"          value="0" summary="user-controlled on/off"/>
+      <entry name="sunset_sunrise"  value="1" summary="active from sunset to sunrise (requires location)"/>
+      <entry name="custom"          value="2" summary="active during a custom time window (custom_start..custom_end, minutes since midnight)"/>
+    </enum>
+
+    <request name="set_night_light">
+      <description summary="enable or disable night light and set its target temperature">
+        Sent by the shell to flip the night-light gamma engine on or off
+        and to update its target colour temperature. Temperature is in
+        Kelvin and the compositor clamps to the supported warm-tint
+        range (typically 1000–6500K). When enabled is 0 the temperature
+        argument is preserved as the manual target but a neutral 6500K
+        ramp is written to hardware (identity LUT).
+      </description>
+      <arg name="enabled"     type="uint" summary="non-zero to activate the warm tint"/>
+      <arg name="temperature" type="uint" summary="target colour temperature in Kelvin"/>
+    </request>
+
+    <request name="set_night_light_schedule">
+      <description summary="configure when night light flips on and off">
+        Sent by the shell to set the schedule mode. For mode `manual`,
+        custom_start and custom_end are ignored. For mode `custom`, the
+        compositor activates night light when the local clock is in
+        [custom_start, custom_end), with wrap-around for overnight
+        windows (e.g. start=1320 (22:00), end=420 (07:00)). For mode
+        `sunset_sunrise`, the compositor uses the location set via
+        `set_night_light_location` to compute the activation window
+        from solar position; if no location has been set the schedule
+        is treated as manual.
+      </description>
+      <arg name="mode"         type="uint" enum="night_light_schedule" summary="new schedule mode"/>
+      <arg name="custom_start" type="uint" summary="custom-mode start in minutes since midnight"/>
+      <arg name="custom_end"   type="uint" summary="custom-mode end in minutes since midnight"/>
+    </request>
+
+    <request name="set_night_light_location">
+      <description summary="set the user's geographic location">
+        Sent by the shell to configure the location used by the
+        sunset_sunrise schedule mode. Latitude and longitude are
+        passed as signed micro-degrees (degrees × 1_000_000) so the
+        protocol can carry them in `int` args without IEEE float
+        ambiguity. Zero on both axes is treated as "unset" by the
+        compositor. The Settings panel writes this on every change
+        to the location inputs.
+      </description>
+      <arg name="latitude_udeg"  type="int" summary="latitude in micro-degrees, range [-90_000_000, 90_000_000]"/>
+      <arg name="longitude_udeg" type="int" summary="longitude in micro-degrees, range [-180_000_000, 180_000_000]"/>
+    </request>
+
   </interface>
 
 </protocol>

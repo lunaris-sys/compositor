@@ -22,6 +22,11 @@ uniform float tint;
 
 uniform float invert;
 uniform float color_mode;
+// Night-light multiplicative tint. (1.0, 1.0, 1.0) means "no tint"
+// (= identity / 6500K neutral); the warm-tint values are <1.0 on
+// the green and blue channels. Applied last so it composes after
+// invert and color-blindness modes.
+uniform vec3 night_light_tint;
 
 void main() {
     vec4 color = texture2D(tex, v_coords);
@@ -82,6 +87,10 @@ void main() {
 
         color.rgb += correction;
     }
+
+    // Night-light tint: per-channel multiply BEFORE re-premultiply
+    // so the alpha math stays consistent.
+    color.rgb *= night_light_tint;
 
     // re-multiply
     color.rgb *= color.a;

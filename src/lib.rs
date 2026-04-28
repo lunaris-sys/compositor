@@ -168,6 +168,11 @@ pub fn run(hooks: crate::hooks::Hooks) -> Result<(), Box<dyn Error>> {
     config::appearance::watch(event_loop.handle());
     theme::watch_theme(event_loop.handle());
 
+    // Recurring 60s schedule timer for night light. Backend must
+    // exist already so the first tick can write to KMS gamma; that
+    // is why this lives after `init_backend_auto`.
+    shell::night_light::install_schedule_timer(&event_loop.handle());
+
     // run the event loop
     event_loop.run(None, &mut state, |state| {
         // shall we shut down?

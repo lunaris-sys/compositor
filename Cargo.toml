@@ -48,6 +48,13 @@ i18n-embed = { version = "0.16", features = [
 ] }
 i18n-embed-fl = "0.10"
 indexmap = "2.13"
+# Night-light schedule timer needs local-time-of-day checks and
+# sunrise/sunset computation. `chrono` is only enabled with `clock`
+# (std-time + tz lookup); `sunrise` is a small (~10KB) NOAA-formula
+# crate that takes a date + lat/lon and returns the UTC unix
+# timestamps of sunrise and sunset. See `shell/night_light_schedule.rs`.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+sunrise = "1.0"
 keyframe = "1.1.1"
 libsystemd = { version = "0.7", optional = true }
 log-panics = { version = "2", features = ["with-backtrace"] }

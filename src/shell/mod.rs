@@ -88,6 +88,8 @@ pub mod focus;
 pub mod fullscreen_reveal;
 pub mod grabs;
 pub mod layout;
+pub mod night_light;
+pub mod night_light_schedule;
 mod seats;
 mod workspace;
 pub mod zoom;

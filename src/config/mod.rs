@@ -161,11 +161,19 @@ pub struct ScreenFilter {
     pub inverted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color_filter: Option<ColorFilter>,
+    /// Night-light multiplicative tint as `(r, g, b)` ratios in
+    /// `[0.0, 1.0]`. `None` means "no tint" (= identity / 6500K).
+    /// Applied as a final multiply in `offscreen.frag` so it works
+    /// on every backend, not just KMS hardware-gamma. Skipped from
+    /// serialization because this is computed live from the night-
+    /// light state, not a persisted preference.
+    #[serde(skip)]
+    pub night_light_tint: Option<[f32; 3]>,
 }
 
 impl ScreenFilter {
     pub fn is_noop(&self) -> bool {
-        !self.inverted && self.color_filter.is_none()
+        !self.inverted && self.color_filter.is_none() && self.night_light_tint.is_none()
     }
 }
 
@@ -1109,6 +1117,7 @@ impl Config {
         ScreenFilter {
             inverted: false,
             color_filter: None,
+            night_light_tint: None,
         }
     }
 

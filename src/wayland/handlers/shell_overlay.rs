@@ -307,6 +307,83 @@ impl ShellOverlayHandler for State {
             );
         }
     }
+
+    fn set_night_light(&mut self, enabled: bool, temperature: u32) {
+        use crate::shell::night_light;
+
+        let temp = (temperature as u16).clamp(
+            night_light::MIN_TEMPERATURE_K,
+            night_light::MAX_TEMPERATURE_K,
+        );
+        // Manual state is what the schedule timer falls back to in
+        // `Manual` mode and what the user re-asserted by clicking
+        // the toggle. The effective `enabled` is then computed from
+        // the schedule + manual state below.
+        self.common.night_light_state.manual_state = enabled;
+        self.common.night_light_state.target_temperature_k = temp;
+        recompute_and_apply_night_light(self);
+        tracing::info!(
+            enabled,
+            temperature = temp,
+            "set_night_light",
+        );
+    }
+
+    fn set_night_light_schedule(
+        &mut self,
+        mode: u32,
+        custom_start: u32,
+        custom_end: u32,
+    ) {
+        use crate::shell::night_light::NightLightSchedule;
+
+        let schedule = match mode {
+            0 => NightLightSchedule::Manual,
+            1 => NightLightSchedule::SunsetSunrise,
+            2 => NightLightSchedule::Custom {
+                start_min: custom_start,
+                end_min: custom_end,
+            },
+            other => {
+                tracing::warn!("set_night_light_schedule: unknown mode {other}");
+                return;
+            }
+        };
+        self.common.night_light_state.schedule = schedule;
+        recompute_and_apply_night_light(self);
+        tracing::info!(?schedule, "set_night_light_schedule");
+    }
+
+    fn set_night_light_location(&mut self, latitude_udeg: i32, longitude_udeg: i32) {
+        use crate::shell::night_light_schedule::Location;
+
+        let location = Location {
+            latitude: latitude_udeg as f64 / 1_000_000.0,
+            longitude: longitude_udeg as f64 / 1_000_000.0,
+        };
+        self.common.night_light_state.location = location;
+        recompute_and_apply_night_light(self);
+        tracing::info!(?location, "set_night_light_location");
+    }
+}
+
+/// Re-evaluate the schedule for `now` and apply the resulting
+/// effective state to the backend. Called from each shell-driven
+/// state change so the user sees the result of their click
+/// immediately, without waiting for the 60s schedule tick.
+fn recompute_and_apply_night_light(state: &mut State) {
+    use chrono::Local;
+    use crate::shell::night_light_schedule;
+
+    let nl = &state.common.night_light_state;
+    let active = night_light_schedule::evaluate(
+        nl.schedule,
+        nl.manual_state,
+        Local::now(),
+        nl.location,
+    );
+    state.common.night_light_state.enabled = active;
+    crate::shell::night_light::apply_to_backend(state);
 }
 
 /// Release the pointer grab held by the `MenuGrab` that owns `menu_id`.

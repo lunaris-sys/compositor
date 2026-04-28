@@ -1902,6 +1902,12 @@ fn postprocess_elements<'a>(
                         .map(|val| val as u8 as f32)
                         .unwrap_or(0.),
                 ),
+                Uniform::new(
+                    "night_light_tint",
+                    screen_filter
+                        .night_light_tint
+                        .unwrap_or([1.0, 1.0, 1.0]),
+                ),
             ],
         ));
     }
@@ -1935,6 +1941,12 @@ fn postprocess_elements<'a>(
                     .color_filter
                     .map(|val| val as u8 as f32)
                     .unwrap_or(0.),
+            ),
+            Uniform::new(
+                "night_light_tint",
+                screen_filter
+                    .night_light_tint
+                    .unwrap_or([1.0, 1.0, 1.0]),
             ),
         ],
     ));

@@ -600,6 +600,21 @@ pub trait ShellOverlayHandler {
 
     /// Called when the shell requests a layout mode change.
     fn set_layout_mode(&mut self, mode: u32);
+
+    /// Called when the shell flips night light on/off or changes its
+    /// target colour temperature.
+    fn set_night_light(&mut self, enabled: bool, temperature: u32);
+
+    /// Called when the shell changes the night-light schedule. `mode`
+    /// follows the `night_light_schedule` enum: 0=manual, 1=sunset,
+    /// 2=custom. `custom_start`/`custom_end` are minutes-since-midnight
+    /// and only meaningful when `mode == 2`.
+    fn set_night_light_schedule(&mut self, mode: u32, custom_start: u32, custom_end: u32);
+
+    /// Called when the shell updates the user's geographic location
+    /// for the sunset/sunrise schedule. Coordinates arrive as signed
+    /// micro-degrees (degrees × 1_000_000). Both zero is "unset".
+    fn set_night_light_location(&mut self, latitude_udeg: i32, longitude_udeg: i32);
 }
 
 // ===== GlobalDispatch =====
@@ -686,6 +701,29 @@ where
                     smithay::reexports::wayland_server::WEnum::Unknown(v) => v,
                 };
                 state.set_layout_mode(mode_u32);
+            }
+            OverlayRequest::SetNightLight {
+                enabled,
+                temperature,
+            } => {
+                state.set_night_light(enabled != 0, temperature);
+            }
+            OverlayRequest::SetNightLightSchedule {
+                mode,
+                custom_start,
+                custom_end,
+            } => {
+                let mode_u32 = match mode {
+                    smithay::reexports::wayland_server::WEnum::Value(v) => v as u32,
+                    smithay::reexports::wayland_server::WEnum::Unknown(v) => v,
+                };
+                state.set_night_light_schedule(mode_u32, custom_start, custom_end);
+            }
+            OverlayRequest::SetNightLightLocation {
+                latitude_udeg,
+                longitude_udeg,
+            } => {
+                state.set_night_light_location(latitude_udeg, longitude_udeg);
             }
         }
     }

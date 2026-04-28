@@ -304,6 +304,13 @@ pub struct Common {
     /// Reset on any non-modifier key press. On Super release with this
     /// flag still set, Waypointer opens.
     pub super_tap_pending: bool,
+    /// Night-light gamma engine state. Mutated by the shell-overlay
+    /// `set_night_light` / `set_night_light_schedule` requests and
+    /// (later) by the schedule timer. Applied to KMS CRTCs via
+    /// `shell::night_light::apply_to_kms`. Backend-aware: on
+    /// non-KMS backends the apply call is skipped entirely (the
+    /// state is still kept so persistence + UI stay consistent).
+    pub night_light_state: crate::shell::night_light::NightLightState,
     /// Pending context menu callbacks keyed by menu_id.
     /// Populated by MenuGrab when a menu is sent to the shell.
     pub pending_menu_callbacks: HashMap<u32, Vec<crate::shell::grabs::menu::Item>>,
@@ -866,6 +873,7 @@ impl State {
                 window_attach_state,
                 fullscreen_reveal: Default::default(),
                 super_tap_pending: false,
+                night_light_state: Default::default(),
                 pending_menu_callbacks: HashMap::new(),
                 presentation_state,
                 primary_selection_state,

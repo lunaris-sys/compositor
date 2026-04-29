@@ -61,22 +61,31 @@ pub struct Config {
     pub dynamic_conf: DynamicConfig,
     /// Path to the Lunaris TOML compositor config file.
     pub toml_path: PathBuf,
-    /// Legacy cosmic-config handle, used by zoom.rs for writing config back.
-    /// Will be removed when zoom.rs is replaced.
-    pub cosmic_helper: cosmic_config::Config,
     /// Compositor configuration loaded from TOML.
     pub cosmic_conf: CosmicCompConfig,
-    /// cosmic-config context for `com.system76.CosmicSettings.Shortcuts`
-    pub settings_context: cosmic_config::Config,
-    /// Key bindings from `com.system76.CosmicSettings.Shortcuts`
+    /// Cosmic-shape `Shortcuts` table. Populated from
+    /// `toml_keybindings` at load time (CC3) — the
+    /// `cosmic-settings-daemon` source is no longer consulted.
+    /// Kept in cosmic shape because the input-dispatch paths in
+    /// `input/mod.rs`, `shell/element/resize_indicator.rs`, the
+    /// tiling-swap grab, and the resize-mode arrow handler all
+    /// iterate it as `Vec<(Binding, Action)>`.
     pub shortcuts: Shortcuts,
-    // Tiling exceptions from `com.system76.CosmicSettings.WindowRules`
+    /// Tiling exceptions. Historically populated from
+    /// `com.system76.CosmicSettings.WindowRules`; that source was
+    /// dropped in compositor #29 / CC3. The field remains as an
+    /// always-empty `Vec` so call sites that already iterate over
+    /// it (`shell/mod.rs::TilingExceptions::new`) compile without
+    /// change. Lunaris-side window-rule semantics live in
+    /// `layout.window_rules`.
     pub tiling_exceptions: Vec<ApplicationException>,
     /// Layout and tiling configuration from TOML.
     pub layout: LayoutConfig,
     /// Keybindings from TOML `[keybindings]` section.
     pub toml_keybindings: Vec<KeyBinding>,
-    /// System actions from `com.system76.CosmicSettings.Shortcuts`
+    /// System actions sourced from `[system_actions]` in
+    /// `compositor.toml`, layered on top of
+    /// `default_system_actions()`.
     pub system_actions: BTreeMap<shortcuts::action::System, String>,
     /// True when running nested inside another Wayland compositor (Winit/X11 backend).
     /// Note: The XKB layout is applied normally even in nested mode because
@@ -89,11 +98,48 @@ pub struct DynamicConfig {
     outputs: (Option<PathBuf>, OutputsConfig),
     numlock: (Option<PathBuf>, NumlockStateConfig),
     accessibility_filter: (Option<PathBuf>, ScreenFilter),
+    /// Runtime-mutable compositor state (autotile toggle,
+    /// pinned-workspace list). Persisted to TOML at
+    /// `~/.local/state/lunaris/compositor/state.toml` so the
+    /// values survive a restart. Read on session start, written
+    /// through `runtime_state_mut()` whenever a user action
+    /// changes them.
+    ///
+    /// The previous home for these was `cosmic_helper.set("autotile", _)`
+    /// and `set("pinned_workspaces", _)` — the cosmic-config
+    /// writeback we are removing as part of compositor #29.
+    runtime_state: (Option<PathBuf>, LunarisRuntimeState),
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NumlockStateConfig {
     pub last_state: bool,
+}
+
+/// Runtime-mutable compositor state held in a single state file.
+///
+/// Distinct from `compositor.toml`: that file is user-authored
+/// configuration, this one is runtime memory of the last toggle
+/// state and the pinned-workspace list. Lives under XDG state, not
+/// XDG config, per the file-system-hierarchy convention.
+///
+/// Fields are `Option` so the precedence rule is unambiguous:
+/// `Some(_)` means "the user has explicitly persisted this value
+/// since startup, override compositor.toml with it"; `None` means
+/// "no override, use whatever compositor.toml says". A missing or
+/// freshly-defaulted state file therefore cannot silently revert
+/// the user's TOML — fix for compositor #29 review HIGH 2.
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+pub struct LunarisRuntimeState {
+    /// Persisted autotile toggle. `None` ⇒ use TOML's value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autotile: Option<bool>,
+    /// Persisted pinned-workspace list. `None` ⇒ use TOML's value.
+    /// The shape is the cosmic-comp `PinnedWorkspace` type from the
+    /// local `cosmic-comp-config` crate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_workspaces:
+        Option<Vec<cosmic_comp_config::workspace::PinnedWorkspace>>,
 }
 
 pub struct CompOutputConfig<'a>(pub Ref<'a, OutputConfig>);
@@ -426,6 +472,11 @@ struct TomlConfig {
     cosmic: CosmicCompConfig,
     layout: LayoutConfig,
     keybindings: Vec<KeyBinding>,
+    /// User overrides for the system-action → spawn-command map.
+    /// Merged on top of `default_system_actions()` at config-load
+    /// time. Empty when no `[system_actions]` section is present
+    /// in compositor.toml.
+    system_actions: BTreeMap<shortcuts::action::System, String>,
 }
 
 fn load_toml_config(path: &std::path::Path) -> TomlConfig {
@@ -433,6 +484,7 @@ fn load_toml_config(path: &std::path::Path) -> TomlConfig {
         cosmic: CosmicCompConfig::default(),
         layout: LayoutConfig::default(),
         keybindings: Vec::new(),
+        system_actions: BTreeMap::new(),
     };
 
     let contents = match std::fs::read_to_string(path) {
@@ -544,12 +596,222 @@ fn load_toml_config(path: &std::path::Path) -> TomlConfig {
 
     let layout = parse_layout_config(&table);
     let keybindings = parse_keybindings_config(&table);
+    let system_actions = parse_system_actions(&table);
 
     TomlConfig {
         cosmic: config,
         layout,
         keybindings,
+        system_actions,
     }
+}
+
+/// Read the `[system_actions]` table from compositor.toml. Keys are
+/// `shortcuts::action::System` enum variants serialised as strings
+/// (e.g. `"VolumeRaise"`, `"BrightnessDown"`); values are the spawn
+/// commands or `shell:` events that fire when the action triggers.
+///
+/// Unknown keys are warned-and-skipped so a typo can't poison
+/// startup. The defaults table from `default_system_actions()` is
+/// always present; the user overrides win on conflict.
+fn parse_system_actions(
+    table: &toml::Table,
+) -> BTreeMap<shortcuts::action::System, String> {
+    let Some(user_table) = table.get("system_actions").and_then(|v| v.as_table()) else {
+        return BTreeMap::new();
+    };
+    let mut out: BTreeMap<shortcuts::action::System, String> = BTreeMap::new();
+    for (key, value) in user_table {
+        let Some(command) = value.as_str() else {
+            warn!(
+                key = %key,
+                "[system_actions] value must be a string, skipping"
+            );
+            continue;
+        };
+        // Round-trip the key string through serde to map it onto the
+        // System enum. Unknown variants come back as a deserialise
+        // error, which we log as a warning and skip.
+        match toml::Value::String(key.clone())
+            .try_into::<shortcuts::action::System>()
+        {
+            Ok(action) => {
+                out.insert(action, command.to_string());
+            }
+            Err(err) => {
+                warn!(
+                    key = %key,
+                    ?err,
+                    "[system_actions] unknown action name, skipping"
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Overlay any persisted runtime-state overrides onto a freshly
+/// parsed `CosmicCompConfig`. Used by both initial load and the
+/// `toml_config_changed` hot-reload path so the precedence rule
+/// stays uniform — fixes the medium finding from compositor #29
+/// review (TOML hot-reload was reverting in-session toggles).
+fn apply_runtime_state_overrides(
+    cosmic_conf: &mut CosmicCompConfig,
+    runtime_state: &LunarisRuntimeState,
+) {
+    if let Some(autotile) = runtime_state.autotile {
+        cosmic_conf.autotile = autotile;
+    }
+    if let Some(pinned) = &runtime_state.pinned_workspaces {
+        cosmic_conf.pinned_workspaces = pinned.clone();
+    }
+}
+
+/// Convert our parsed Lunaris keybindings into the cosmic-shape
+/// `Shortcuts` table. Several dispatch paths
+/// (`input/mod.rs::handle_keyboard_event`, the resize-mode arrow
+/// handler, the tiling-swap grab, the resize indicator) iterate
+/// `(Binding, Action)` in cosmic terms; populating this from our
+/// TOML keeps those code paths working without a wide rewrite.
+///
+/// Lunaris-private actions (`shell:`, `module:`, scratchpad,
+/// monocle, etc.) are filtered out here — the cosmic table only
+/// holds cosmic-`Action` variants. Private actions still dispatch
+/// through the `toml_keybindings` loop in input handling.
+fn build_cosmic_shortcuts(toml_keybindings: &[KeyBinding]) -> Shortcuts {
+    use cosmic_settings_config::shortcuts::{Binding, Modifiers as CosmicModifiers};
+    use std::collections::HashMap;
+
+    let mut map: HashMap<Binding, shortcuts::Action> = HashMap::new();
+    for kb in toml_keybindings {
+        let Some(action) = key_bindings::action_from_str(&kb.action) else {
+            continue;
+        };
+        let cosmic_action = match action {
+            key_bindings::Action::Shortcut(a) => a,
+            // Lunaris-private actions are dispatched directly from
+            // the toml_keybindings loop in input/mod.rs.
+            key_bindings::Action::Private(_) => continue,
+        };
+        let mods = CosmicModifiers {
+            ctrl: kb.modifiers.ctrl,
+            alt: kb.modifiers.alt,
+            shift: kb.modifiers.shift,
+            logo: kb.modifiers.super_key,
+        };
+        let key = key_bindings::keysym_from_str(&kb.key);
+        let binding = Binding::new(mods, key);
+        map.insert(binding, cosmic_action);
+    }
+    Shortcuts(map)
+}
+
+/// Map a cosmic-side `shortcuts::Action` value to the action
+/// string used inside Lunaris' `compositor.toml [keybindings]`
+/// table. Inverse of the prefix-aware mapping in
+/// `key_bindings::action_from_str`. Used by `shortcut_for_action`
+/// to find the user-visible accelerator label for a context-menu
+/// item.
+///
+/// Variants without a TOML representation (e.g. `ToggleStacking`,
+/// which is invoked from the menu but not user-bindable yet) fall
+/// through with `None` — the menu code handles `None` by hiding
+/// the shortcut label.
+fn cosmic_action_to_action_string(
+    action: &shortcuts::Action,
+) -> Option<&'static str> {
+    use cosmic_settings_config::shortcuts::Action as A;
+    Some(match action {
+        A::Close => "close_window",
+        A::Minimize => "minimize",
+        A::Maximize => "maximize",
+        A::Fullscreen => "fullscreen",
+        A::ToggleWindowFloating => "toggle_window_floating",
+        A::ToggleTiling => "toggle_tiling",
+        A::SwapWindow => "swap_window",
+        A::NextWorkspace => "workspace_next",
+        A::PreviousWorkspace => "workspace_prev",
+        _ => return None,
+    })
+}
+
+/// Render a keybinding (modifiers + key) as the
+/// "Super+Shift+Q"-style string the context-menu UI expects.
+fn format_keybinding(mods: &KeyBindingModifiers, key: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if mods.super_key {
+        parts.push("Super");
+    }
+    if mods.ctrl {
+        parts.push("Ctrl");
+    }
+    if mods.alt {
+        parts.push("Alt");
+    }
+    if mods.shift {
+        parts.push("Shift");
+    }
+    parts.push(key);
+    parts.join("+")
+}
+
+/// Built-in defaults for the system-action map. These are what
+/// users get when they ship a compositor.toml without a
+/// `[system_actions]` section, and they replace the prior
+/// `cosmic-settings-daemon` IPC inheritance once CC3 lands.
+///
+/// The commands intentionally use generic CLI tools (`wpctl`,
+/// `playerctl`, `loginctl`, `xdg-open`) so the defaults work on a
+/// fresh Lunaris install without extra wiring. Distros or users
+/// can override individual entries via `[system_actions]`.
+pub fn default_system_actions() -> BTreeMap<shortcuts::action::System, String> {
+    use shortcuts::action::System;
+    let mut m = BTreeMap::new();
+    m.insert(
+        System::VolumeRaise,
+        "spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+".into(),
+    );
+    m.insert(
+        System::VolumeLower,
+        "spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-".into(),
+    );
+    m.insert(
+        System::Mute,
+        "spawn:wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle".into(),
+    );
+    m.insert(
+        System::MuteMic,
+        "spawn:wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle".into(),
+    );
+    // Brightness goes through the shell-overlay protocol so the
+    // already-built coalesced step worker (D3.6) handles it; falling
+    // back to brightnessctl would bypass the gamma-corrected slider
+    // math and the persistence path.
+    m.insert(System::BrightnessUp, "shell:brightness_up".into());
+    m.insert(System::BrightnessDown, "shell:brightness_down".into());
+    m.insert(System::PlayPause, "spawn:playerctl play-pause".into());
+    m.insert(System::PlayNext, "spawn:playerctl next".into());
+    m.insert(System::PlayPrev, "spawn:playerctl previous".into());
+    m.insert(
+        System::LockScreen,
+        "spawn:loginctl lock-session".into(),
+    );
+    m.insert(System::Suspend, "spawn:systemctl suspend".into());
+    m.insert(
+        System::PowerOff,
+        "spawn:systemctl poweroff".into(),
+    );
+    m.insert(System::LogOut, "spawn:loginctl terminate-session $XDG_SESSION_ID".into());
+    m.insert(System::HomeFolder, "spawn:xdg-open ~".into());
+    m.insert(System::WebBrowser, "spawn:xdg-open https:".into());
+    m.insert(System::Launcher, "shell:waypointer_open".into());
+    m.insert(System::AppLibrary, "shell:waypointer_open".into());
+    m.insert(
+        System::WindowSwitcher,
+        "shell:workspace_map_open".into(),
+    );
+    m.insert(System::Screenshot, "spawn:grim".into());
+    m
 }
 
 /// Parse layout configuration from the TOML table.
@@ -946,74 +1208,32 @@ impl Config {
             std::mem::forget(watcher);
         }
 
-        // Source key bindings from com.system76.CosmicSettings.Shortcuts
-        let settings_context = shortcuts::context().expect("Failed to load shortcuts config");
-        let system_actions = shortcuts::system_actions(&settings_context);
-        let shortcuts = shortcuts::shortcuts(&settings_context);
+        // Build the system-actions map from defaults plus the
+        // user's `[system_actions]` overrides. The
+        // cosmic-settings-daemon source was removed in
+        // compositor #29 / CC3 — Lunaris no longer inherits
+        // anything from `com.system76.CosmicSettings.*`.
+        let mut system_actions = default_system_actions();
+        for (action, command) in toml_config.system_actions.clone() {
+            system_actions.insert(action, command);
+        }
 
-        // Listen for updates to the keybindings config.
-        match cosmic_config::calloop::ConfigWatchSource::new(&settings_context) {
-            Ok(source) => {
-                if let Err(err) = loop_handle.insert_source(source, |(config, keys), (), state| {
-                    for key in keys {
-                        match key.as_str() {
-                            // Reload the keyboard shortcuts config.
-                            "custom" | "defaults" => {
-                                state.common.config.shortcuts = shortcuts::shortcuts(&config);
-                            }
+        // Build the cosmic-shape Shortcuts table from our
+        // toml_keybindings list. The dispatch loops in
+        // input/mod.rs and the tiling/resize indicators iterate
+        // this in cosmic-Action terms; populating it locally
+        // keeps those paths functional while the cosmic-settings
+        // source disappears.
+        let shortcuts = build_cosmic_shortcuts(&toml_keybindings);
 
-                            "system_actions" => {
-                                state.common.config.system_actions =
-                                    shortcuts::system_actions(&config);
-                            }
-
-                            _ => (),
-                        }
-                    }
-                }) {
-                    warn!(
-                        ?err,
-                        "Failed to watch com.system76.CosmicSettings.Shortcuts config"
-                    );
-                }
-            }
-            Err(err) => warn!(
-                ?err,
-                "failed to create config watch source for com.system76.CosmicSettings.Shortcuts"
-            ),
-        };
-
-        let window_rules_context =
-            window_rules::context().expect("Failed to load window rules config");
-        let tiling_exceptions = window_rules::tiling_exceptions(&window_rules_context);
-
-        match cosmic_config::calloop::ConfigWatchSource::new(&window_rules_context) {
-            Ok(source) => {
-                if let Err(err) = loop_handle.insert_source(source, |(config, keys), (), state| {
-                    for key in keys {
-                        match key.as_str() {
-                            "tiling_exception_defaults" | "tiling_exception_custom" => {
-                                let new_exceptions = window_rules::tiling_exceptions(&config);
-                                state.common.config.tiling_exceptions = new_exceptions;
-                                state.common.shell.write().update_tiling_exceptions(
-                                    state.common.config.tiling_exceptions.iter(),
-                                );
-                            }
-                            _ => (),
-                        }
-                    }
-                }) {
-                    warn!(
-                        ?err,
-                        "Failed to watch com.system76.CosmicSettings.WindowRules config"
-                    );
-                }
-            }
-            Err(err) => warn!(
-                ?err,
-                "failed to create config watch source for com.system76.CosmicSettings.WindowRules"
-            ),
-        };
+        // tiling_exceptions formerly populated from
+        // `com.system76.CosmicSettings.WindowRules`. That source is
+        // gone — Lunaris-side window rules live in
+        // `compositor.toml [layout].window_rules` and flow through
+        // the `Config.layout.window_rules` field instead. We keep
+        // this Vec empty so `shell::TilingExceptions::new` and
+        // friends still compile.
+        let tiling_exceptions: Vec<ApplicationException> = Vec::new();
 
         let _ = loop_handle.insert_idle(|state| {
             let filter_conf = state.common.config.dynamic_conf.screen_filter();
@@ -1027,16 +1247,23 @@ impl Config {
                 .set_screen_filter(filter_conf.color_filter);
         });
 
-        // Legacy cosmic-config handle kept for zoom.rs write-back.
-        let cosmic_helper =
-            cosmic_config::Config::new("com.system76.CosmicComp", 1).unwrap();
+        // Load runtime state, then merge any explicit overrides
+        // into `cosmic_comp_config`. Precedence rule (compositor
+        // #29 review HIGH 2): runtime state only wins when the
+        // user has actually persisted the field (`Some(_)`); a
+        // missing or default state file leaves the TOML value
+        // intact.
+        let dynamic_conf = Self::load_dynamic(&xdg);
+        let mut cosmic_comp_config = cosmic_comp_config;
+        apply_runtime_state_overrides(
+            &mut cosmic_comp_config,
+            dynamic_conf.runtime_state(),
+        );
 
         Config {
-            dynamic_conf: Self::load_dynamic(&xdg),
+            dynamic_conf,
             cosmic_conf: cosmic_comp_config,
             toml_path,
-            cosmic_helper,
-            settings_context,
             shortcuts,
             tiling_exceptions,
             layout: layout_config,
@@ -1078,10 +1305,46 @@ impl Config {
             .ok();
         let filter = Self::load_filter_state(&filter_path);
 
+        let runtime_state_path = xdg
+            .place_state_file("lunaris/compositor/state.toml")
+            .ok();
+        let runtime_state = Self::load_runtime_state(&runtime_state_path);
+
         DynamicConfig {
             outputs: (displays_path, outputs),
             numlock: (numlock_path, numlock),
             accessibility_filter: (filter_path, filter),
+            runtime_state: (runtime_state_path, runtime_state),
+        }
+    }
+
+    /// Read `~/.local/state/lunaris/compositor/state.toml`. Missing
+    /// or unparseable file returns defaults — this state can always
+    /// be regenerated from the next user toggle, so a corrupt file
+    /// is logged-and-replaced rather than fatal.
+    fn load_runtime_state(path: &Option<PathBuf>) -> LunarisRuntimeState {
+        let Some(path) = path.as_deref() else {
+            return LunarisRuntimeState::default();
+        };
+        if !path.exists() {
+            return LunarisRuntimeState::default();
+        }
+        match std::fs::read_to_string(path) {
+            Ok(content) => match toml::from_str::<LunarisRuntimeState>(&content) {
+                Ok(state) => state,
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        "Failed to parse lunaris compositor runtime state, resetting.."
+                    );
+                    let _ = std::fs::remove_file(path);
+                    LunarisRuntimeState::default()
+                }
+            },
+            Err(err) => {
+                warn!(?err, "Failed to read lunaris compositor runtime state");
+                LunarisRuntimeState::default()
+            }
         }
     }
 
@@ -1128,7 +1391,11 @@ impl Config {
     }
 
     pub fn shortcut_for_action(&self, action: &shortcuts::Action) -> Option<String> {
-        self.shortcuts.shortcut_for_action(action)
+        let action_str = cosmic_action_to_action_string(action)?;
+        self.toml_keybindings
+            .iter()
+            .find(|kb| kb.action == action_str)
+            .map(|kb| format_keybinding(&kb.modifiers, &kb.key))
     }
 
     pub fn read_outputs(
@@ -1598,6 +1865,26 @@ impl DynamicConfig {
             serialize: ron_serialize,
         }
     }
+
+    pub fn runtime_state(&self) -> &LunarisRuntimeState {
+        &self.runtime_state.1
+    }
+
+    /// Mutable handle to the runtime-state file. The returned
+    /// guard writes back to `state.toml` atomically (tmp + rename)
+    /// when dropped. Use for any field on `LunarisRuntimeState`
+    /// that needs to persist across sessions.
+    pub fn runtime_state_mut(&mut self) -> PersistenceGuard<'_, LunarisRuntimeState> {
+        PersistenceGuard {
+            path: self.runtime_state.0.clone(),
+            value: &mut self.runtime_state.1,
+            serialize: lunaris_runtime_serialize,
+        }
+    }
+}
+
+fn lunaris_runtime_serialize(value: &LunarisRuntimeState) -> Result<String, String> {
+    toml::to_string_pretty(value).map_err(|e| e.to_string())
 }
 
 /// Reads the system XKB layout from `localectl status`.
@@ -1722,7 +2009,15 @@ pub fn change_modifier_state(
 /// applies side effects for any fields that differ from the current state.
 fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
     let toml = load_toml_config(toml_path);
-    let new = toml.cosmic;
+    let mut new = toml.cosmic;
+    // Re-apply runtime-state overrides on hot-reload so an
+    // unrelated TOML edit doesn't revert the user's in-session
+    // toggle (autotile, pinned_workspaces). Same precedence rule
+    // as initial load — fixes compositor #29 review MEDIUM.
+    apply_runtime_state_overrides(
+        &mut new,
+        state.common.config.dynamic_conf.runtime_state(),
+    );
 
     // Capture old toggle state before we replace the layout so we can
     // detect a tiled_headers flip and trigger a reconfigure storm only
@@ -1732,6 +2027,20 @@ fn toml_config_changed(toml_path: &std::path::Path, state: &mut State) {
     // Update layout config and keybindings.
     state.common.config.layout = toml.layout;
     state.common.config.toml_keybindings = toml.keybindings;
+    // Rebuild the cosmic-shape Shortcuts table off the new
+    // toml_keybindings so the dispatch loops in input/mod.rs see
+    // the live update.
+    state.common.config.shortcuts =
+        build_cosmic_shortcuts(&state.common.config.toml_keybindings);
+
+    // Rebuild system-actions from defaults + user overrides.
+    // The cosmic-settings-daemon source is gone (CC3); the user's
+    // `[system_actions]` table is the only override layer.
+    let mut system_actions = default_system_actions();
+    for (action, command) in toml.system_actions.clone() {
+        system_actions.insert(action, command);
+    }
+    state.common.config.system_actions = system_actions;
 
     // Refresh the dynamic binding resolver's static snapshot so
     // D-Bus-registered bindings continue to see the right static
@@ -2141,6 +2450,293 @@ action = "float"
         assert_eq!(
             frag,
             std::path::Path::new("/etc/lunaris/compositor.d/keybindings.d")
+        );
+    }
+
+    /// Round-trip: serialize a `LunarisRuntimeState`, parse it back,
+    /// and confirm the fields survive. Catches accidental serde
+    /// drift on the runtime-state schema.
+    #[test]
+    fn runtime_state_round_trips_through_toml() {
+        let original = LunarisRuntimeState {
+            autotile: Some(true),
+            pinned_workspaces: Some(Vec::new()),
+        };
+        let serialized = lunaris_runtime_serialize(&original).expect("serialize");
+        let parsed: LunarisRuntimeState =
+            toml::from_str(&serialized).expect("parse round-trip");
+        assert_eq!(parsed.autotile, original.autotile);
+        assert_eq!(
+            parsed.pinned_workspaces.as_ref().map(|v| v.len()),
+            Some(0)
+        );
+    }
+
+    /// Missing fields stay `None`. The override semantics in
+    /// `apply_runtime_state_overrides` then leave the TOML value
+    /// untouched, so a partially-populated state file can never
+    /// silently revert a TOML setting it doesn't mention.
+    #[test]
+    fn runtime_state_missing_fields_use_defaults() {
+        let parsed: LunarisRuntimeState =
+            toml::from_str("").expect("empty body parses");
+        assert_eq!(
+            parsed.autotile, None,
+            "missing autotile must be None so TOML wins"
+        );
+        assert_eq!(
+            parsed.pinned_workspaces, None,
+            "missing pinned_workspaces must be None so TOML wins"
+        );
+
+        // Partial: only autotile present.
+        let parsed: LunarisRuntimeState =
+            toml::from_str("autotile = true").expect("partial body parses");
+        assert_eq!(parsed.autotile, Some(true));
+        assert_eq!(parsed.pinned_workspaces, None);
+    }
+
+    /// `load_runtime_state` returns defaults (all-`None`) when the
+    /// file is missing. Combined with `apply_runtime_state_overrides`,
+    /// this means a fresh install never overwrites the user's TOML
+    /// with hardcoded false/empty defaults.
+    #[test]
+    fn load_runtime_state_missing_path_is_default() {
+        let state = Config::load_runtime_state(&None);
+        assert_eq!(state.autotile, None);
+        assert_eq!(state.pinned_workspaces, None);
+
+        // Path that doesn't exist on disk.
+        let nonexistent = Some(std::path::PathBuf::from(
+            "/tmp/nonexistent-lunaris-runtime-state.toml",
+        ));
+        let state = Config::load_runtime_state(&nonexistent);
+        assert_eq!(state.autotile, None);
+    }
+
+    /// `[system_actions]` parses known keys onto the System enum
+    /// and skips unknown keys with a warning rather than crashing.
+    #[test]
+    fn parse_system_actions_known_and_unknown() {
+        use shortcuts::action::System;
+        let toml: toml::Table = toml::from_str(
+            r#"
+[system_actions]
+VolumeRaise = "spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
+BrightnessUp = "shell:brightness_up"
+NotARealAction = "spawn:nope"
+"#,
+        )
+        .unwrap();
+        let actions = parse_system_actions(&toml);
+        assert_eq!(
+            actions.get(&System::VolumeRaise),
+            Some(&"spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+".to_string())
+        );
+        assert_eq!(
+            actions.get(&System::BrightnessUp),
+            Some(&"shell:brightness_up".to_string())
+        );
+        // Unknown variant is silently dropped (logged warn at runtime).
+        assert_eq!(actions.len(), 2);
+    }
+
+    /// Defaults must cover the everyday Fn-row keys (volume,
+    /// brightness, mute, play/pause). A user with a bare
+    /// compositor.toml and no `[system_actions]` should still be
+    /// able to use those keys.
+    #[test]
+    fn default_system_actions_covers_fn_row() {
+        use shortcuts::action::System;
+        let defaults = default_system_actions();
+        for action in [
+            System::VolumeRaise,
+            System::VolumeLower,
+            System::Mute,
+            System::BrightnessUp,
+            System::BrightnessDown,
+            System::PlayPause,
+            System::PlayNext,
+            System::PlayPrev,
+        ] {
+            assert!(
+                defaults.contains_key(&action),
+                "default missing for {action:?}"
+            );
+        }
+    }
+
+    /// Every default system-action value must start with one of
+    /// the known dispatch prefixes (`shell:` or `spawn:`). The
+    /// `Action::System` arm in `input/actions.rs` strips these
+    /// prefixes before dispatch — a bare value would have been
+    /// passed verbatim to `/bin/sh -c` and silently failed. This
+    /// is the data-side guard against the regression flagged in
+    /// compositor #29 review HIGH 1.
+    #[test]
+    fn default_system_actions_use_known_prefix() {
+        for (action, command) in default_system_actions() {
+            assert!(
+                command.starts_with("shell:") || command.starts_with("spawn:"),
+                "default for {action:?} = {command:?} must use a known prefix \
+                 (shell: or spawn:); bare strings break system-action dispatch"
+            );
+        }
+    }
+
+    /// Cosmic-shape Shortcuts is built from our toml_keybindings.
+    /// Cosmic-`Action` variants flow through, Lunaris-private
+    /// actions (shell:, module:, scratchpad, etc.) are filtered
+    /// out so only what the cosmic dispatch loops understand ends
+    /// up in the table.
+    #[test]
+    fn build_cosmic_shortcuts_maps_only_cosmic_actions() {
+        let kbs = vec![
+            KeyBinding {
+                modifiers: KeyBindingModifiers {
+                    super_key: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                key: "q".into(),
+                action: "close_window".into(),
+            },
+            KeyBinding {
+                modifiers: KeyBindingModifiers {
+                    super_key: true,
+                    ..Default::default()
+                },
+                key: "space".into(),
+                action: "shell:waypointer_open".into(),
+            },
+            KeyBinding {
+                modifiers: KeyBindingModifiers {
+                    super_key: true,
+                    ..Default::default()
+                },
+                key: "F".into(),
+                action: "fullscreen".into(),
+            },
+        ];
+        let shortcuts = build_cosmic_shortcuts(&kbs);
+        // close_window + fullscreen are cosmic actions → in the table.
+        // shell:waypointer_open is Lunaris-private → filtered out.
+        assert_eq!(shortcuts.0.len(), 2);
+        let actions: Vec<_> = shortcuts.0.values().collect();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, shortcuts::Action::Close)),
+            "Close action missing from cosmic shortcuts"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, shortcuts::Action::Fullscreen)),
+            "Fullscreen action missing from cosmic shortcuts"
+        );
+    }
+
+    /// `format_keybinding` produces the canonical "Super+Shift+Q"
+    /// shape used in the context-menu shortcut labels.
+    #[test]
+    fn format_keybinding_canonical_order() {
+        let mods = KeyBindingModifiers {
+            super_key: true,
+            ctrl: true,
+            alt: true,
+            shift: true,
+        };
+        assert_eq!(format_keybinding(&mods, "Q"), "Super+Ctrl+Alt+Shift+Q");
+
+        let mods_super_only = KeyBindingModifiers {
+            super_key: true,
+            ..Default::default()
+        };
+        assert_eq!(format_keybinding(&mods_super_only, "Tab"), "Super+Tab");
+
+        let mods_none = KeyBindingModifiers::default();
+        assert_eq!(format_keybinding(&mods_none, "F1"), "F1");
+    }
+
+    /// Override semantics: when a TOML key collides with a
+    /// default, the user's value wins. This mirrors the Right-most
+    /// merge order in `Config::load`.
+    #[test]
+    fn toml_overrides_beat_defaults_via_merge() {
+        use shortcuts::action::System;
+        let mut merged = default_system_actions();
+        let toml: toml::Table = toml::from_str(
+            r#"
+[system_actions]
+BrightnessUp = "spawn:my-custom-brightness-helper"
+"#,
+        )
+        .unwrap();
+        let overrides = parse_system_actions(&toml);
+        for (k, v) in overrides {
+            merged.insert(k, v);
+        }
+        assert_eq!(
+            merged.get(&System::BrightnessUp),
+            Some(&"spawn:my-custom-brightness-helper".to_string())
+        );
+        // Untouched defaults still present.
+        assert!(merged.contains_key(&System::VolumeRaise));
+    }
+
+    /// A corrupt state file is removed and replaced with defaults
+    /// rather than crashing the compositor.
+    #[test]
+    fn load_runtime_state_corrupt_file_resets() {
+        let dir = std::env::temp_dir().join("lunaris-runtime-state-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("corrupt.toml");
+        std::fs::write(&path, "not = valid = toml = at = all").unwrap();
+        assert!(path.exists(), "test setup");
+
+        let state = Config::load_runtime_state(&Some(path.clone()));
+        assert_eq!(state.autotile, None, "fell back to defaults");
+        assert!(
+            !path.exists(),
+            "corrupt file must be removed so the next write starts clean"
+        );
+    }
+
+    /// Override precedence: an empty/missing runtime state must NOT
+    /// overwrite a TOML-configured `autotile = true`. Codex review
+    /// HIGH 2 — a fresh install used to revert this silently.
+    #[test]
+    fn runtime_state_none_does_not_override_toml() {
+        let mut cosmic = CosmicCompConfig::default();
+        cosmic.autotile = true;
+
+        let runtime = LunarisRuntimeState::default(); // None / None
+        apply_runtime_state_overrides(&mut cosmic, &runtime);
+
+        assert!(
+            cosmic.autotile,
+            "TOML autotile=true must survive an empty runtime state"
+        );
+    }
+
+    /// Override precedence: an explicit `Some(_)` in runtime state
+    /// wins over the TOML value. Mirrors the post-toggle path
+    /// where the user has actively flipped autotile.
+    #[test]
+    fn runtime_state_some_overrides_toml() {
+        let mut cosmic = CosmicCompConfig::default();
+        cosmic.autotile = false;
+
+        let runtime = LunarisRuntimeState {
+            autotile: Some(true),
+            pinned_workspaces: None,
+        };
+        apply_runtime_state_overrides(&mut cosmic, &runtime);
+
+        assert!(
+            cosmic.autotile,
+            "explicit Some(true) must override the TOML value"
         );
     }
 }

@@ -25,17 +25,14 @@ cosmic-comp-config = { path = "cosmic-comp-config", features = [
     "libdisplay-info",
     "output",
 ] }
-cosmic-config = { git = "https://github.com/pop-os/libcosmic", features = [
-    "calloop",
-    "macro",
-] }
 cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols", rev = "160b086", default-features = false, features = [
     "server",
 ] }
+# Type-library only (architecture decision D1 in compositor #29):
+# we use the `Action`, `Binding`, `Modifiers`, and
+# `shortcuts::action::*` types for cosmic-shape dispatch. The
+# runtime-config functions on this crate are no longer called.
 cosmic-settings-config = { git = "https://github.com/pop-os/cosmic-settings-daemon" }
-cosmic-settings-daemon-config = { git = "https://github.com/pop-os/cosmic-settings-daemon", features = [
-    "greeter",
-] }
 cosmic-text = { git = "https://github.com/pop-os/cosmic-text.git", features = [
     "shape-run-cache",
 ] }

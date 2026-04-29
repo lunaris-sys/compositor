@@ -4,8 +4,6 @@ use crate::state::{BackendData, State};
 use crate::wayland::protocols::a11y::A11yHandler;
 use anyhow::{Context, Result, anyhow};
 use cosmic_comp_config::NumlockState;
-use cosmic_config::CosmicConfigEntry;
-use cosmic_settings_daemon_config::greeter;
 use smithay::reexports::{calloop::EventLoop, wayland_server::DisplayHandle};
 use tracing::{info, warn};
 
@@ -81,41 +79,14 @@ pub fn init_backend_auto(
             .seats
             .add_seat(initial_seat.clone());
 
-        let greeter_state = match greeter::GreeterAccessibilityState::config() {
-            Ok(helper) => match greeter::GreeterAccessibilityState::get_entry(&helper) {
-                Ok(s) => s,
-                Err((errs, s)) => {
-                    for err in errs {
-                        tracing::error!("Error loading greeter state: {err:?}");
-                    }
-                    s
-                }
-            },
-            Err(_) => {
-                tracing::info!("`cosmic-greeter` state not found.");
-                greeter::GreeterAccessibilityState::default()
-            }
-        };
-
-        if let Some(magnifier) = greeter_state.magnifier {
-            let mut zoom = state.common.config.cosmic_conf.accessibility_zoom;
-
-            zoom.start_on_login = magnifier;
-            if let Err(err) = state
-                .common
-                .config
-                .cosmic_conf
-                .set_accessibility_zoom(&state.common.config.cosmic_helper, zoom)
-            {
-                tracing::error!("Failed to set screen filter: {err:?}");
-            }
-        }
-
-        if let Some(inverted) = greeter_state.invert_colors
-            && inverted != state.a11y_state().screen_inverted()
-        {
-            state.request_screen_invert(inverted);
-        }
+        // cosmic-greeter accessibility-state inheritance was here.
+        // Removed as part of compositor #29 / CC1: Lunaris ships
+        // its own Phase 10A greeter, the cross-process sync via
+        // cosmic-config.GreeterAccessibilityState was load-bearing
+        // only for cosmic-greeter installs. Accessibility settings
+        // now come exclusively from `compositor.toml`
+        // [accessibility_zoom] and the user toggles them in-session
+        // through the existing zoom shortcuts.
 
         if state
             .common

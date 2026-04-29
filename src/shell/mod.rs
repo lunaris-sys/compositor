@@ -22,7 +22,6 @@ use cosmic_comp_config::{
     AppearanceConfig, TileBehavior, ZoomConfig, ZoomMovement,
     workspace::{PinnedWorkspace, WorkspaceLayout, WorkspaceMode},
 };
-use cosmic_config::ConfigSet;
 use cosmic_protocols::workspace::v2::server::zcosmic_workspace_handle_v2::TilingState;
 use cosmic_settings_config::shortcuts::action::{Direction, FocusDirection, ResizeDirection};
 use cosmic_settings_config::{shortcuts, window_rules::ApplicationException};
@@ -1462,19 +1461,19 @@ impl Workspaces {
         self.apply_tile_change(guard, seats);
     }
 
-    pub fn persist(&self, config: &Config) {
+    pub fn persist(&self, config: &mut Config) {
         let pinned_workspaces: Vec<PinnedWorkspace> = self
             .sets
             .values()
             .flat_map(|set| &set.workspaces)
             .flat_map(|w| w.to_pinned())
             .collect();
-        let config = config.cosmic_helper.clone();
-        thread::spawn(move || {
-            if let Err(err) = config.set("pinned_workspaces", pinned_workspaces) {
-                error!(?err, "Failed to update pinned_workspaces key");
-            }
-        });
+        // Persist into the lunaris compositor runtime-state file.
+        // The previous cosmic-config writeback path is gone with
+        // compositor #29 / CC1; the state-file is the new home.
+        // `Some(_)` marks this as an explicit override of the
+        // TOML default for the next session.
+        config.dynamic_conf.runtime_state_mut().pinned_workspaces = Some(pinned_workspaces);
     }
 }
 

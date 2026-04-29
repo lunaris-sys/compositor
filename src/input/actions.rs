@@ -13,7 +13,6 @@ use crate::{
     },
 };
 use cosmic_comp_config::{TileBehavior, workspace::WorkspaceLayout};
-use cosmic_config::ConfigSet;
 use cosmic_settings_config::shortcuts;
 use cosmic_settings_config::shortcuts::action::{Direction, FocusDirection};
 use smithay::{
@@ -134,49 +133,7 @@ impl State {
             }
 
             Action::Private(PrivateAction::ShellEvent(name)) => {
-                // Dispatch named shell-overlay events bound via the `shell:` TOML
-                // prefix. Only `waypointer_open` is wired into the protocol today;
-                // remaining names parse successfully so Settings can still list
-                // them, but emit a warning until the protocol is extended.
-                match name.as_str() {
-                    "waypointer_open" | "waypointer_toggle" => {
-                        self.common.shell_overlay_state.send_waypointer_open();
-                    }
-                    // Canonical name is `workspace_map_open` since Lunaris
-                    // renamed the overlay UI to "Workspace Map". The old
-                    // `workspace_overlay_*` names remain aliased so
-                    // existing user configs (and the catalog entry with
-                    // the old action string) keep working without a
-                    // compositor restart contract break. All four names
-                    // land on the same Wayland event.
-                    "workspace_map_open"
-                    | "workspace_map_toggle"
-                    | "workspace_overlay_open"
-                    | "workspace_overlay_toggle" => {
-                        // The shell decides whether this opens fresh or
-                        // cycles focus to the next window — receiving
-                        // the same event twice is the explicit cycle
-                        // signal (see WorkspaceIndicator.svelte).
-                        self.common
-                            .shell_overlay_state
-                            .send_workspace_overlay_open();
-                    }
-                    // Hardware brightness keys (laptop Fn-row).
-                    // Compositor stays brightness-state-free; the
-                    // shell does the read-modify-write via logind.
-                    "brightness_up" => {
-                        self.common.shell_overlay_state.send_brightness_step(1);
-                    }
-                    "brightness_down" => {
-                        self.common.shell_overlay_state.send_brightness_step(-1);
-                    }
-                    other => {
-                        warn!(
-                            event = other,
-                            "shell: event has no compositor binding yet; ignoring"
-                        );
-                    }
-                }
+                self.dispatch_shell_event(&name);
             }
 
             Action::Private(PrivateAction::ModuleAction {
@@ -1158,12 +1115,18 @@ impl State {
                             shell_ref.seats.iter(),
                         );
                     }
-                    let config = self.common.config.cosmic_helper.clone();
-                    thread::spawn(move || {
-                        if let Err(err) = config.set("autotile", autotile) {
-                            error!(?err, "Failed to update autotile key");
-                        }
-                    });
+                    // Persist the new toggle value to
+                    // `~/.local/state/lunaris/compositor/state.toml`
+                    // so the next session starts in the same mode.
+                    // `Some(_)` marks this as an explicit user
+                    // override — the field-level precedence in
+                    // `apply_runtime_state_overrides` will then
+                    // replace any TOML default on the next load.
+                    self.common
+                        .config
+                        .dynamic_conf
+                        .runtime_state_mut()
+                        .autotile = Some(autotile);
                     // Notify shell of mode change.
                     let mode = if autotile {
                         crate::shell::LayoutMode::Tiling
@@ -1208,9 +1171,25 @@ impl State {
             }
 
             // Gets the configured command for a given system action.
+            // Values are TOML strings using the same prefix grammar as
+            // `[keybindings]`: `shell:<event>` dispatches an overlay
+            // event, `spawn:<cmd>` runs a shell command, anything else
+            // falls through to `spawn_command` for legacy bare-string
+            // configs. Without this prefix-aware dispatch, defaults
+            // such as `spawn:wpctl ...` or `shell:brightness_up` would
+            // be passed verbatim to `/bin/sh -c` and fail silently
+            // (see compositor #29 / CC2 review).
             Action::System(system) => {
-                if let Some(command) = self.common.config.system_actions.get(&system) {
-                    self.spawn_command(command.clone());
+                if let Some(command) = self.common.config.system_actions.get(&system).cloned() {
+                    if let Some(event) = command.strip_prefix("shell:") {
+                        self.dispatch_shell_event(event);
+                    } else if let Some(cmd) = command.strip_prefix("spawn:") {
+                        self.spawn_command(cmd.to_string());
+                    } else {
+                        // Bare command, no prefix — keep prior
+                        // behaviour for legacy user configs.
+                        self.spawn_command(command);
+                    }
                 }
             }
 
@@ -1232,6 +1211,54 @@ impl State {
 
             // Do nothing
             Action::Disable => (),
+        }
+    }
+
+    /// Dispatch a `shell:<event>` overlay request. Extracted from
+    /// the `PrivateAction::ShellEvent` arm so the same name table
+    /// is reachable from `Action::System` after prefix stripping —
+    /// without this, system-action defaults like
+    /// `shell:brightness_up` would be passed straight to
+    /// `/bin/sh -c` and silently fail.
+    pub fn dispatch_shell_event(&mut self, name: &str) {
+        match name {
+            "waypointer_open" | "waypointer_toggle" => {
+                self.common.shell_overlay_state.send_waypointer_open();
+            }
+            // Canonical name is `workspace_map_open` since Lunaris
+            // renamed the overlay UI to "Workspace Map". The old
+            // `workspace_overlay_*` names remain aliased so
+            // existing user configs (and the catalog entry with
+            // the old action string) keep working without a
+            // compositor restart contract break. All four names
+            // land on the same Wayland event.
+            "workspace_map_open"
+            | "workspace_map_toggle"
+            | "workspace_overlay_open"
+            | "workspace_overlay_toggle" => {
+                // The shell decides whether this opens fresh or
+                // cycles focus to the next window — receiving
+                // the same event twice is the explicit cycle
+                // signal (see WorkspaceIndicator.svelte).
+                self.common
+                    .shell_overlay_state
+                    .send_workspace_overlay_open();
+            }
+            // Hardware brightness keys (laptop Fn-row).
+            // Compositor stays brightness-state-free; the
+            // shell does the read-modify-write via logind.
+            "brightness_up" => {
+                self.common.shell_overlay_state.send_brightness_step(1);
+            }
+            "brightness_down" => {
+                self.common.shell_overlay_state.send_brightness_step(-1);
+            }
+            other => {
+                warn!(
+                    event = other,
+                    "shell: event has no compositor binding yet; ignoring"
+                );
+            }
         }
     }
 

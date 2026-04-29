@@ -80,10 +80,10 @@ impl WorkspaceHandler for State {
                             }
                             update.add_workspace_state(&workspace.handle, WState::Pinned);
                             // TODO: Also need to update on changing other properties that are saved
-                            shell.workspaces.persist(&self.common.config);
+                            shell.workspaces.persist(&mut self.common.config);
                         } else {
                             update.remove_workspace_state(&workspace.handle, WState::Pinned);
-                            shell.workspaces.persist(&self.common.config);
+                            shell.workspaces.persist(&mut self.common.config);
                         }
                     }
                 }

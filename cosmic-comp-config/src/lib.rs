@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use cosmic_config::{CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -66,8 +65,10 @@ impl Default for AppearanceConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, CosmicConfigEntry)]
-#[version = 1]
+/// Compositor configuration. Loaded from `compositor.toml` via
+/// `toml::from_str` in the parent `cosmic-comp` crate; the
+/// previous cosmic-config inheritance was removed in #29 / CC4.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct CosmicCompConfig {
     pub workspaces: workspace::WorkspaceConfig,
     pub pinned_workspaces: Vec<workspace::PinnedWorkspace>,

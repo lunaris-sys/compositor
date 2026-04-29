@@ -414,6 +414,22 @@
       </description>
     </event>
 
+    <!-- ===== Hardware brightness keys ===== -->
+
+    <event name="brightness_step">
+      <description summary="user pressed XF86MonBrightnessUp/Down">
+        Emitted when the compositor catches a hardware brightness key
+        press (XF86MonBrightnessUp / Down on a laptop's Fn-row).
+        The shell reads the current backlight value via logind and
+        steps it in the indicated direction; step size and clamping
+        live entirely on the shell side so the compositor stays
+        free of brightness state. Repeat events fire while the key
+        is held — the shell coalesces to ~30Hz to avoid flooding
+        logind D-Bus.
+      </description>
+      <arg name="direction" type="int" summary="+1 for brighter, -1 for darker"/>
+    </event>
+
     <!-- ===== Window Actions Enum ===== -->
 
     <enum name="window_action">

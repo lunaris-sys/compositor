@@ -449,6 +449,16 @@ impl ShellOverlayState {
             instance.workspace_overlay_open();
         }
     }
+
+    /// Notify connected shells that a hardware brightness key was
+    /// pressed. `direction` is `+1` for brighter, `-1` for darker.
+    /// The shell-side handler does the read-modify-write against
+    /// logind so brightness state stays single-sourced there.
+    pub fn send_brightness_step(&self, direction: i32) {
+        for instance in &self.instances {
+            instance.brightness_step(direction);
+        }
+    }
 }
 
 // ===== Menu item types =====

@@ -161,6 +161,15 @@ impl State {
                             .shell_overlay_state
                             .send_workspace_overlay_open();
                     }
+                    // Hardware brightness keys (laptop Fn-row).
+                    // Compositor stays brightness-state-free; the
+                    // shell does the read-modify-write via logind.
+                    "brightness_up" => {
+                        self.common.shell_overlay_state.send_brightness_step(1);
+                    }
+                    "brightness_down" => {
+                        self.common.shell_overlay_state.send_brightness_step(-1);
+                    }
                     other => {
                         warn!(
                             event = other,

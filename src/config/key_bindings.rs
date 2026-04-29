@@ -211,6 +211,20 @@ pub fn keysym_from_str(key: &str) -> Option<smithay::input::keyboard::Keysym> {
         "f10" => Keysym::F10,
         "f11" => Keysym::F11,
         "f12" => Keysym::F12,
+        // XF86 multimedia keys — laptops emit these for the
+        // hardware Fn-row. Without these entries the keys would
+        // parse to `None` and silently drop out of the binding
+        // table; with them, the user (or `default_keybindings()`)
+        // can target them via the bare name.
+        "xf86monbrightnessup" => Keysym::XF86_MonBrightnessUp,
+        "xf86monbrightnessdown" => Keysym::XF86_MonBrightnessDown,
+        "xf86audioraisevolume" => Keysym::XF86_AudioRaiseVolume,
+        "xf86audiolowervolume" => Keysym::XF86_AudioLowerVolume,
+        "xf86audiomute" => Keysym::XF86_AudioMute,
+        "xf86audioplay" => Keysym::XF86_AudioPlay,
+        "xf86audiopause" => Keysym::XF86_AudioPause,
+        "xf86audionext" => Keysym::XF86_AudioNext,
+        "xf86audioprev" => Keysym::XF86_AudioPrev,
         _ => return None,
     })
 }
@@ -377,5 +391,42 @@ mod tests {
         assert!(keysym_from_str("F1").is_some());
         // Unknown.
         assert!(keysym_from_str("NotAKey").is_none());
+    }
+
+    #[test]
+    fn test_keysym_from_str_xf86_brightness() {
+        use smithay::input::keyboard::Keysym;
+        // XF86 multimedia keys must resolve so the laptop Fn-row
+        // can be bound from default_keybindings() and from
+        // user-edited compositor.toml. Case-insensitive.
+        assert_eq!(
+            keysym_from_str("XF86MonBrightnessUp"),
+            Some(Keysym::XF86_MonBrightnessUp)
+        );
+        assert_eq!(
+            keysym_from_str("XF86MonBrightnessDown"),
+            Some(Keysym::XF86_MonBrightnessDown)
+        );
+        // Lowercase still resolves.
+        assert_eq!(
+            keysym_from_str("xf86monbrightnessup"),
+            Some(Keysym::XF86_MonBrightnessUp)
+        );
+    }
+
+    #[test]
+    fn test_keysym_from_str_xf86_audio() {
+        use smithay::input::keyboard::Keysym;
+        // Volume keys are wired up too even though no default
+        // binding uses them yet — saves a future protocol round
+        // when audio shortcuts land.
+        assert_eq!(
+            keysym_from_str("XF86AudioRaiseVolume"),
+            Some(Keysym::XF86_AudioRaiseVolume)
+        );
+        assert_eq!(
+            keysym_from_str("XF86AudioMute"),
+            Some(Keysym::XF86_AudioMute)
+        );
     }
 }

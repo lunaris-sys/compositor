@@ -810,6 +810,12 @@ pub fn default_keybindings() -> Vec<KeyBinding> {
         ("Super+Return", "spawn:foot"),
         ("Super+Space", "shell:waypointer_open"),
         ("Super+Tab", "shell:workspace_map_open"),
+        // Hardware brightness keys (laptop Fn-row). The shell-side
+        // handler reads the current backlight via logind and
+        // steps it ±5 % per press. See `D3.6` in
+        // `docs/architecture/display-system.md`.
+        ("XF86MonBrightnessUp", "shell:brightness_up"),
+        ("XF86MonBrightnessDown", "shell:brightness_down"),
     ];
     for (key_str, action) in defaults {
         if let Some((modifiers, key)) = parse_keybinding(key_str) {

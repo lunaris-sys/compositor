@@ -476,7 +476,7 @@ impl CosmicWindow {
         }
         let lt = crate::theme::lunaris_theme();
         let mut radii = lt
-            .radius_s
+            .radius.window_corners
             .map(|x| if x < 4.0 { x } else { x + 4.0 })
             .map(|x| (x * scale as f32).round() as u8);
         if has_ssd && !clip {
@@ -514,7 +514,7 @@ impl CosmicWindow {
                 radii,
                 if activated { alpha } else { alpha * 0.75 },
                 output_scale.x,
-                lt.is_dark,
+                lt.is_dark(),
             ))
             .into(),
         )
@@ -537,7 +537,7 @@ impl CosmicWindow {
     {
         let (has_ssd, is_tiled, is_maximized, mut radii, appearance) = {
             let p = self.p();
-            let raw_radius = crate::theme::lunaris_theme().radius_s;
+            let raw_radius = crate::theme::lunaris_theme().radius.window_corners;
             let mapped = raw_radius
                 .map(|x| if x < 4.0 { x } else { x + 4.0 })
                 .map(|x| x.round() as u8);
@@ -587,7 +587,7 @@ impl CosmicWindow {
 
         // Window border removed: desktop-shell handles all window chrome
         // via the shell overlay protocol. The previous 1px border used
-        // lt.border (#e2e2e8) which appeared white on dark backgrounds.
+        // lt.color.border_default (#e2e2e8) which appeared white on dark backgrounds.
 
         let window_elements = {
             let p = self.p();
@@ -986,7 +986,7 @@ impl CosmicWindow {
         let radii = if round {
             {
                 crate::theme::lunaris_theme()
-                    .radius_s
+                    .radius.window_corners
                     .map(|x| if x < 4.0 { x } else { x + 4.0 })
                     .map(|x| x.round() as u8)
             }

@@ -428,23 +428,23 @@ pub fn rasterize_header(
     tracing::info!(
         "RENDER-DEBUG rasterize_header w={} h={} scale={:.2} activated={} \
          interaction={:?} theme_gen={} \
-         bg=theme.bg_shell={:?} (shell-surface) \
+         bg=theme.color.bg_shell={:?} (shell-surface) \
          icon_color=fg_primary={:?} \
          btn_idle_op={} btn_inact_op={} btn_W={} btn_H={} gap={} right_pad={} \
          icon_sizes={{min:{},sqr:{},cls:{}}} \
          lucide_stroke_at12={:.3}px lucide_stroke_at10={:.3}px \
          accent={:?} error={:?} border={:?} \
-         radius_md={}",
+         effective_card={} effective_button={}",
         pixel_w, pixel_h, scale, state.activated,
         state.interaction, state.theme_generation,
-        theme.bg_shell, theme.fg_primary,
+        theme.color.bg_shell, theme.color.fg_primary,
         BUTTON_IDLE_OPACITY, BUTTON_IDLE_OPACITY_INACTIVE,
         BUTTON_LOGICAL_WIDTH, BUTTON_LOGICAL_HEIGHT, BUTTON_GAP,
         BUTTON_STRIP_RIGHT_PAD,
         ICON_SIZE_MINUS, ICON_SIZE_SQUARE, ICON_SIZE_CLOSE,
         lucide_stroke_width(12.0), lucide_stroke_width(10.0),
-        theme.accent, theme.error, theme.border,
-        theme.radius_md,
+        theme.color.accent, theme.color.error, theme.color.border_default,
+        theme.effective_card(), theme.effective_button(),
     );
 
     let mut pixmap = Pixmap::new(pixel_w.max(1), pixel_h.max(1))
@@ -509,9 +509,9 @@ fn rgba_to_bgra_inplace(data: &mut [u8]) {
 /// The window header is shell chrome (sits on the same "level"
 /// visually as the topbar and popovers), so it uses shell-surface
 /// semantics, not the root `--background` (`bg_app`) that regular
-/// app content uses. Reading `theme.bg_shell` here is the fix for
+/// app content uses. Reading `theme.color.bg_shell` here is the fix for
 /// "topbar #0a0a0a vs header #0f0f0f visible mismatch" — the old
-/// `theme.bg_app` read matched the Svelte `WindowHeader.svelte` at
+/// `theme.color.bg_app` read matched the Svelte `WindowHeader.svelte` at
 /// root scope, which ITSELF was out of sync with the topbar's
 /// shell-surface scope. We also flip the Svelte version to use
 /// shell-surface tokens so stack headers stay consistent.
@@ -524,12 +524,15 @@ fn draw_background(
     let mut pb = PathBuilder::new();
     let w = state.width as f32;
     let h = HEADER_LOGICAL_HEIGHT as f32;
-    let r = theme.radius_md;
+    // Window-header outline uses the `card` semantic radius (12px
+    // default) — it's a container, not an interactive element,
+    // so MD3 size-proportional says container > children.
+    let r = theme.effective_card();
 
     // Rounded-top, square-bottom path. Walks clockwise from the
-    // bottom-left. When `radius_md == 0` (sharp-corner user
-    // preference), the quadratic control points collapse into the
-    // line endpoints and tiny-skia renders a plain rect — no
+    // bottom-left. When effective_card == 0 (sharp-corner user
+    // intensity = 0%), the quadratic control points collapse into
+    // the line endpoints and tiny-skia renders a plain rect — no
     // subpixel rounding tint.
     pb.move_to(0.0, h);
     pb.line_to(0.0, r);
@@ -540,7 +543,7 @@ fn draw_background(
     pb.close();
 
     let mut paint = Paint::default();
-    paint.set_color(to_skia(theme.bg_shell));
+    paint.set_color(to_skia(theme.color.bg_shell));
     paint.anti_alias = true;
     let ts = SkiaTransform::from_scale(scale as f32, scale as f32);
     if let Some(path) = pb.finish() {
@@ -562,7 +565,7 @@ fn draw_bottom_border(
     let w = state.width as f32;
     let h = HEADER_LOGICAL_HEIGHT as f32;
     let mut paint = Paint::default();
-    paint.set_color(to_skia(theme.border));
+    paint.set_color(to_skia(theme.color.border_default));
     paint.anti_alias = false;
     let ts = SkiaTransform::from_scale(scale as f32, scale as f32);
     if let Some(rect) = Rect::from_xywh(0.0, h - 1.0, w, 1.0) {
@@ -601,12 +604,14 @@ fn draw_buttons(
         let ts = local.post_scale(scale as f32, scale as f32);
 
         // Background: rounded-rect fill if hover or pressed,
-        // transparent otherwise.
+        // transparent otherwise. Buttons inside the header use the
+        // `button` semantic radius (6px default) — interactive
+        // controls, smaller than container.
         if bg_color[3] > 0.001 {
             let mut pb = PathBuilder::new();
             let left = b.center_x - hw;
             let top = b.center_y - hh;
-            let radius = theme.radius_md;
+            let radius = theme.effective_button();
             rounded_rect_path(&mut pb, left, top, b.width, b.height, radius);
             if let Some(path) = pb.finish() {
                 let mut paint = Paint::default();
@@ -629,11 +634,11 @@ fn draw_buttons(
             let top = b.center_y - rh * 0.5;
             rounded_rect_path(
                 &mut pb,
-                left, top, rw, rh, theme.radius_md + offset,
+                left, top, rw, rh, theme.effective_button() + offset,
             );
             if let Some(path) = pb.finish() {
                 let mut paint = Paint::default();
-                paint.set_color(to_skia(theme.accent));
+                paint.set_color(to_skia(theme.color.accent));
                 paint.anti_alias = true;
                 let mut stroke = Stroke::default();
                 stroke.width = 2.0;
@@ -718,9 +723,9 @@ fn button_visual(
     //     app backgrounds.
     //   non-hover         → transparent
     let bg_raw = if hovered && is_close {
-        theme.error
+        theme.color.error
     } else if hovered {
-        let mut tint = theme.fg_primary;
+        let mut tint = theme.color.fg_primary;
         tint[3] = 0.10;
         tint
     } else {
@@ -734,7 +739,7 @@ fn button_visual(
     let icon_raw = if hovered && is_close {
         [1.0, 1.0, 1.0, 1.0]
     } else {
-        theme.fg_primary
+        theme.color.fg_primary
     };
     let mut icon_color = icon_raw;
     icon_color[3] *= button_opacity;
@@ -899,6 +904,21 @@ fn draw_button_icon(
 mod tests {
     use super::*;
 
+    /// Build a usable test theme from the bundled dark.toml bytes.
+    /// Replaces the removed `LunarisTheme::lunaris_dark()` constant.
+    fn test_theme_dark() -> LunarisTheme {
+        const BUNDLED: &str =
+            include_str!("../../../../desktop-shell/src-tauri/themes/dark.toml");
+        LunarisTheme::from_bundled(BUNDLED).expect("bundled dark must parse")
+    }
+
+    /// Light variant for tests.
+    fn test_theme_light() -> LunarisTheme {
+        const BUNDLED: &str =
+            include_str!("../../../../desktop-shell/src-tauri/themes/light.toml");
+        LunarisTheme::from_bundled(BUNDLED).expect("bundled light must parse")
+    }
+
     fn stub_state(width: i32, activated: bool) -> HeaderVisualState {
         HeaderVisualState {
             width,
@@ -977,12 +997,12 @@ mod tests {
             interaction: ButtonInteraction::Hover(HeaderButton::Close),
             ..stub_state(800, true)
         };
-        let theme = LunarisTheme::lunaris_dark();
+        let theme = test_theme_dark();
         let (bg, icon, scale) = button_visual(HeaderButton::Close, &state, &theme);
         // Full destructive RGB at full alpha (activated window → opacity 1.0).
-        assert!((bg[0] - theme.error[0]).abs() < 0.001, "R {}", bg[0]);
-        assert!((bg[1] - theme.error[1]).abs() < 0.001);
-        assert!((bg[2] - theme.error[2]).abs() < 0.001);
+        assert!((bg[0] - theme.color.error[0]).abs() < 0.001, "R {}", bg[0]);
+        assert!((bg[1] - theme.color.error[1]).abs() < 0.001);
+        assert!((bg[2] - theme.color.error[2]).abs() < 0.001);
         assert!((bg[3] - 1.0).abs() < 0.001, "A should be full, got {}", bg[3]);
         // Icon pure white at full alpha on activated window.
         assert_eq!(icon, [1.0, 1.0, 1.0, 1.0]);
@@ -1000,9 +1020,9 @@ mod tests {
             interaction: ButtonInteraction::Hover(HeaderButton::Close),
             ..stub_state(800, false) // inactive
         };
-        let theme = LunarisTheme::lunaris_dark();
+        let theme = test_theme_dark();
         let (bg, icon, _) = button_visual(HeaderButton::Close, &state, &theme);
-        assert!((bg[0] - theme.error[0]).abs() < 0.001);
+        assert!((bg[0] - theme.color.error[0]).abs() < 0.001);
         // hover on inactive → BUTTON_IDLE_OPACITY (0.7), not 1.0.
         assert!((bg[3] - BUTTON_IDLE_OPACITY).abs() < 0.001);
         // Icon still pure white RGB.
@@ -1015,7 +1035,7 @@ mod tests {
         // Canonical WindowControls has no transform animation —
         // verify all states stay at scale 1.0 so the compositor
         // doesn't reintroduce the bouncy scale-on-press feel.
-        let theme = LunarisTheme::lunaris_dark();
+        let theme = test_theme_dark();
 
         let idle = stub_state(800, true);
         let (_, _, s_idle) = button_visual(HeaderButton::Minimize, &idle, &theme);
@@ -1037,24 +1057,28 @@ mod tests {
     }
 
     #[test]
-    fn button_visual_no_hover_bg_for_non_close() {
-        // Non-close hover keeps bg transparent — only opacity
-        // changes. This is the visible difference vs the older
-        // desktop-shell variant that mixed a 10 % foreground tint.
-        let theme = LunarisTheme::lunaris_dark();
+    fn button_visual_non_close_hover_paints_subtle_tint() {
+        // Non-close hover paints a 10 % foreground tint on top of
+        // the button-opacity baseline (1.0 when activated). Mirror
+        // of the shell's `color-mix(var(--color-fg-shell), 10%)`
+        // hover convention. Final alpha = 0.10 * 1.0 = 0.10.
+        let theme = test_theme_dark();
         let hover = HeaderVisualState {
             interaction: ButtonInteraction::Hover(HeaderButton::Minimize),
             ..stub_state(800, true)
         };
         let (bg, _, _) = button_visual(HeaderButton::Minimize, &hover, &theme);
-        // Pre-multiplied alpha == 0 → background fully transparent.
-        assert!(bg[3] < 1e-5, "non-close hover should not paint bg, got alpha {}", bg[3]);
+        assert!(
+            (bg[3] - 0.10).abs() < 1e-5,
+            "non-close hover should paint 10% foreground tint, got alpha {}",
+            bg[3]
+        );
     }
 
     #[test]
     fn button_visual_idle_is_transparent() {
         let state = stub_state(800, true);
-        let theme = LunarisTheme::panda();
+        let theme = test_theme_dark();
         let (bg, _, scale) = button_visual(HeaderButton::Minimize, &state, &theme);
         assert_eq!(bg[3], 0.0);
         assert!((scale - 1.0).abs() < 0.001);
@@ -1133,7 +1157,7 @@ mod tests {
     #[test]
     fn rasterize_produces_buffer_of_correct_size() {
         let state = stub_state(600, true);
-        let theme = LunarisTheme::panda();
+        let theme = test_theme_dark();
         let buf = rasterize_header(&state, &theme);
         // MemoryRenderBuffer dims are (width, height) physical.
         // Can't easily inspect internals; just ensure it doesn't panic.
@@ -1144,7 +1168,7 @@ mod tests {
     fn rasterize_handles_empty_title() {
         let mut state = stub_state(600, true);
         state.title = String::new();
-        let theme = LunarisTheme::panda();
+        let theme = test_theme_dark();
         let _ = rasterize_header(&state, &theme);
     }
 
@@ -1152,7 +1176,7 @@ mod tests {
     fn rasterize_handles_hidpi_scale() {
         let mut state = stub_state(600, true);
         state.scale = 2.0;
-        let theme = LunarisTheme::panda();
+        let theme = test_theme_dark();
         let _ = rasterize_header(&state, &theme);
     }
 
@@ -1161,7 +1185,7 @@ mod tests {
         // Window smaller than the button strip should still not
         // panic — clamped to minimum width internally.
         let state = stub_state(10, true);
-        let theme = LunarisTheme::panda();
+        let theme = test_theme_dark();
         let _ = rasterize_header(&state, &theme);
     }
 
@@ -1180,10 +1204,10 @@ mod tests {
         // rasterised output bytes — proves the renderer honours
         // the token instead of silently falling back to a literal.
         let state = stub_state(600, true);
-        let mut theme_a = LunarisTheme::lunaris_dark();
-        theme_a.radius_md = 0.0;
-        let mut theme_b = LunarisTheme::lunaris_dark();
-        theme_b.radius_md = 16.0;
+        let mut theme_a = test_theme_dark();
+        theme_a.radius.card = 0.0;
+        let mut theme_b = test_theme_dark();
+        theme_b.radius.card = 16.0;
         // MemoryRenderBuffer doesn't expose data() directly, so we
         // can't diff bytes here, but running the rasteriser with
         // different radius values must not panic and must produce
@@ -1198,22 +1222,22 @@ mod tests {
     fn rasterize_uses_theme_bg_app_not_hardcoded() {
         // A `bg_app` swap should change the rasterised pixels.
         let state = stub_state(600, true);
-        let mut dark = LunarisTheme::lunaris_dark();
-        let mut light = LunarisTheme::lunaris_light();
+        let mut dark = test_theme_dark();
+        let mut light = test_theme_light();
         // Sanity: the two presets don't have the same bg_app.
-        assert_ne!(dark.bg_app, light.bg_app);
-        dark.bg_app = [1.0, 0.0, 0.0, 1.0]; // pure red
-        light.bg_app = [0.0, 1.0, 0.0, 1.0]; // pure green
+        assert_ne!(dark.color.bg_app, light.color.bg_app);
+        dark.color.bg_app = [1.0, 0.0, 0.0, 1.0]; // pure red
+        light.color.bg_app = [0.0, 1.0, 0.0, 1.0]; // pure green
         let _ = rasterize_header(&state, &dark);
         let _ = rasterize_header(&state, &light);
     }
 
     #[test]
     fn rasterize_picks_theme_accent_for_focus_ring() {
-        // Focused-button rendering uses theme.accent for the ring.
+        // Focused-button rendering uses theme.color.accent for the ring.
         let mut state = stub_state(600, true);
         state.focused_button = Some(HeaderButton::Close);
-        let theme = LunarisTheme::lunaris_dark();
+        let theme = test_theme_dark();
         let _ = rasterize_header(&state, &theme);
     }
 
@@ -1268,17 +1292,17 @@ mod tests {
     fn rasterize_picks_theme_error_for_close_hover_full_opacity() {
         // Superseded by `button_visual_close_hover_is_full_destructive`
         // — kept here as a no-brainer sanity check that the close
-        // hover bg at least pulls from theme.error (not some other
+        // hover bg at least pulls from theme.color.error (not some other
         // token). Full semantics in the dedicated test.
         let state = HeaderVisualState {
             interaction: ButtonInteraction::Hover(HeaderButton::Close),
             ..stub_state(600, true)
         };
-        let theme = LunarisTheme::lunaris_dark();
+        let theme = test_theme_dark();
         let (bg, _, _) = button_visual(HeaderButton::Close, &state, &theme);
-        assert!((bg[0] - theme.error[0]).abs() < 0.01, "close hover R should match theme.error");
-        assert!((bg[1] - theme.error[1]).abs() < 0.01);
-        assert!((bg[2] - theme.error[2]).abs() < 0.01);
+        assert!((bg[0] - theme.color.error[0]).abs() < 0.01, "close hover R should match theme.color.error");
+        assert!((bg[1] - theme.color.error[1]).abs() < 0.01);
+        assert!((bg[2] - theme.color.error[2]).abs() < 0.01);
     }
 
     #[test]
@@ -1289,13 +1313,13 @@ mod tests {
         //   (inactive window is a compositor-specific extension)
         //   inactive  + idle  → opacity 0.4
         //   inactive  + hover → opacity 0.7
-        let theme = LunarisTheme::lunaris_dark();
+        let theme = test_theme_dark();
 
         let (_, icon_act_idle, _) =
             button_visual(HeaderButton::Minimize, &stub_state(600, true), &theme);
         // Icon RGB is fg_primary; alpha times button_opacity = 0.7.
         assert!((icon_act_idle[3] - BUTTON_IDLE_OPACITY).abs() < 1e-5);
-        assert_eq!(icon_act_idle[0], theme.fg_primary[0]);
+        assert_eq!(icon_act_idle[0], theme.color.fg_primary[0]);
 
         let hover_state = HeaderVisualState {
             interaction: ButtonInteraction::Hover(HeaderButton::Minimize),
@@ -1326,12 +1350,12 @@ mod tests {
         // check by construction — we verify the theme preset has
         // distinct bg_shell and bg_app so a silent future
         // refactor that flips them can't hide.
-        let dark = LunarisTheme::lunaris_dark();
+        let dark = test_theme_dark();
         assert_ne!(
-            dark.bg_shell, dark.bg_app,
+            dark.color.bg_shell, dark.color.bg_app,
             "dark theme should have distinct shell-chrome vs app-content backgrounds"
         );
-        assert_eq!(dark.bg_shell, [0x0a as f32 / 255.0, 0x0a as f32 / 255.0, 0x0a as f32 / 255.0, 1.0]);
-        assert_eq!(dark.bg_app,   [0x0f as f32 / 255.0, 0x0f as f32 / 255.0, 0x0f as f32 / 255.0, 1.0]);
+        assert_eq!(dark.color.bg_shell, [0x0a as f32 / 255.0, 0x0a as f32 / 255.0, 0x0a as f32 / 255.0, 1.0]);
+        assert_eq!(dark.color.bg_app,   [0x0f as f32 / 255.0, 0x0f as f32 / 255.0, 0x0f as f32 / 255.0, 1.0]);
     }
 }

@@ -143,14 +143,14 @@ impl MoveGrabState {
             layers.non_exclusive_zone()
         };
 
-        let gaps = (lt.gaps.0 as i32, lt.gaps.1 as i32);
+        let gaps = (lt.wm.gaps_inner as i32, lt.wm.gaps_outer as i32);
         let thickness = self.indicator_thickness.max(1);
-        let lt_radius = lt.radius_s.map(|r| r.round() as u8);
+        let lt_radius = lt.radius.window_corners.map(|r| r.round() as u8);
 
         let snapping_indicator = match &self.snapping_zone {
             Some(t) if &self.cursor_output == output => {
                 // Neutral background for snapping zone overlay.
-                let base_color = lt.fg_secondary;
+                let base_color = lt.color.fg_secondary;
                 let overlay_geometry = t.overlay_geometry(non_exclusive_geometry, gaps);
                 vec![
                     CosmicMappedRenderElement::from(IndicatorShader::element(
@@ -167,7 +167,7 @@ impl MoveGrabState {
                         renderer,
                         Key::Window(Usage::SnappingIndicator, self.window.key()),
                         t.overlay_geometry(non_exclusive_geometry, gaps),
-                        lt.radius_s[0],
+                        lt.radius.window_corners[0],
                         0.4,
                         [base_color[0], base_color[1], base_color[2]],
                     )),

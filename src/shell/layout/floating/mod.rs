@@ -1642,7 +1642,7 @@ impl FloatingLayout {
     }
 
     fn gaps(&self) -> (i32, i32) {
-        let g = crate::theme::lunaris_theme().gaps;
-        (g.0 as i32, g.1 as i32)
+        let lt = crate::theme::lunaris_theme();
+        (lt.wm.gaps_inner as i32, lt.wm.gaps_outer as i32)
     }
 }

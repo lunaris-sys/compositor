@@ -1461,6 +1461,31 @@ impl Workspaces {
         self.apply_tile_change(guard, seats);
     }
 
+    /// Re-snapshot every pinned workspace into
+    /// `~/.local/state/lunaris/compositor/state.toml`.
+    ///
+    /// `PinnedWorkspace` persists three fields per workspace:
+    /// `output` (which monitor it lives on), `tiling_enabled`
+    /// (per-workspace tile/float mode), and `id` (stable across
+    /// restarts). Any mutation that touches one of these fields
+    /// on a pinned workspace must call `persist` afterwards or
+    /// the next session will restore stale data — the
+    /// `runtime_state.pinned_workspaces` Some-override beats the
+    /// TOML default but it lies if it isn't kept current.
+    ///
+    /// Trigger sites enforced today (compositor #29 review HIGH 3):
+    /// - `Request::SetPin` flips the `pinned` flag itself.
+    /// - `Action::ToggleTiling` Global mode cascades
+    ///   `tiling_enabled` across every workspace.
+    /// - `Action::ToggleTiling` PerWorkspace mode flips one
+    ///   workspace's `tiling_enabled` (only persists when that
+    ///   workspace is pinned).
+    /// - `Action::MigrateWorkspaceToOutput` changes the `output`
+    ///   field on the moved workspace.
+    ///
+    /// New mutation paths that touch any of those three fields
+    /// MUST be added to this list — there is no automatic
+    /// dirty-tracking on `Workspace`.
     pub fn persist(&self, config: &mut Config) {
         let pinned_workspaces: Vec<PinnedWorkspace> = self
             .sets
@@ -2419,7 +2444,7 @@ impl Shell {
                 set_tiled_headers_global(config.layout.tiled_headers);
                 config.layout.tiled_headers
             },
-            lunaris_theme: lunaris_theme::LunarisTheme::load(),
+            lunaris_theme: crate::theme::lunaris_theme(),
             overview_mode: OverviewMode::None,
             swap_indicator: None,
             resize_mode: ResizeMode::None,
@@ -4797,7 +4822,7 @@ impl Shell {
             GrabStartData::Touch(start_data) => Trigger::Touch(start_data.slot),
         };
         let active_hint = if config.cosmic_conf.active_hint {
-            self.lunaris_theme.active_hint as u8
+            self.lunaris_theme.wm.active_hint as u8
         } else {
             0
         };

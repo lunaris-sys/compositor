@@ -2482,6 +2482,7 @@ dependencies = [
  "dirs 5.0.1",
  "notify 7.0.0",
  "serde",
+ "thiserror 1.0.69",
  "toml 0.8.23",
 ]
 

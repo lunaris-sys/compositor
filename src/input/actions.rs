@@ -822,6 +822,14 @@ impl State {
                             &mut workspace_state,
                         );
                         drop(workspace_state);
+                        // Re-snapshot pinned workspaces — the moved
+                        // workspace's `output` field just changed
+                        // and PinnedWorkspace persists that field.
+                        // Without this, a pinned workspace would
+                        // come back on the previous output after
+                        // restart even though the user moved it
+                        // (compositor #29 review HIGH 3).
+                        shell.workspaces.persist(&mut self.common.config);
                         drop(shell);
                         if res.is_ok() {
                             self.handle_shortcut_action(
@@ -1114,6 +1122,14 @@ impl State {
                             &mut self.common.workspace_state.update(),
                             shell_ref.seats.iter(),
                         );
+                        // Pinned workspaces' `tiling_enabled` field
+                        // just cascaded with the global toggle.
+                        // Re-snapshot so state.toml mirrors reality
+                        // (compositor #29 review HIGH 3 — the
+                        // previous code only persisted on pin-flip,
+                        // letting tiling_enabled drift on every
+                        // global mode change).
+                        shell_ref.workspaces.persist(&mut self.common.config);
                     }
                     // Persist the new toggle value to
                     // `~/.local/state/lunaris/compositor/state.toml`
@@ -1138,7 +1154,7 @@ impl State {
                         .send_layout_mode_changed(mode as u32);
                 } else {
                     let output = seat.active_output();
-                    let new_mode = {
+                    let (new_mode, was_pinned) = {
                         let mut shell = self.common.shell.write();
                         let workspace = shell.workspaces.active_mut(&output).unwrap();
                         let mut guard = self.common.workspace_state.update();
@@ -1149,8 +1165,17 @@ impl State {
                         } else {
                             crate::shell::LayoutMode::Floating
                         };
-                        workspace.layout_mode
+                        (workspace.layout_mode, workspace.pinned)
                     };
+                    // Only re-snapshot pinned-workspace state when
+                    // the toggled workspace was actually pinned.
+                    // Per-workspace toggles on transient workspaces
+                    // don't touch state.toml — saves a write per
+                    // unpinned-workspace toggle.
+                    if was_pinned {
+                        let mut shell = self.common.shell.write();
+                        shell.workspaces.persist(&mut self.common.config);
+                    }
                     self.common
                         .shell_overlay_state
                         .send_layout_mode_changed(new_mode as u32);

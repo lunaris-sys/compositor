@@ -5361,7 +5361,7 @@ where
         let scale = swap_geo.size.to_f64() / origin.size.to_f64();
 
         let radius = crate::theme::lunaris_theme()
-            .radius_s
+            .radius.window_corners
             .map(|x| if x < 4.0 { x } else { x + 4.0 })
             .map(|val| (val * scale.x.min(scale.y) as f32).round() as u8);
         swap_elements.push(CosmicMappedRenderElement::FocusIndicator(
@@ -5436,7 +5436,7 @@ where
                                 .map(|val| (val as f64 * scale.x.min(scale.y)).round() as u8)
                         }
                         _ => crate::theme::lunaris_theme()
-                            .radius_s
+                            .radius.window_corners
                             .map(|x| if x < 4.0 { x } else { x + 4.0 })
                             .map(|val| (val * scale.x.min(scale.y) as f32).round() as u8),
                     };

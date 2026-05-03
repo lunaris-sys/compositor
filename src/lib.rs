@@ -151,7 +151,27 @@ pub fn run(hooks: crate::hooks::Hooks) -> Result<(), Box<dyn Error>> {
     let mut event_loop = EventLoop::try_new().with_context(|| "Failed to initialize event loop")?;
     // init wayland
     let (display, socket) = init_wayland_display(&mut event_loop)?;
-    // init state
+
+    // Pre-resolve the effective theme BEFORE State::new so the
+    // compositor-rendered window header / hint border / tile gaps
+    // start on the correct theme from frame 1. Without this, the
+    // global LUNARIS_THEME stays None until `watch_theme` runs
+    // later, and `State::new` / `Shell::new` end up caching the
+    // hardcoded default-dark fallback. The watcher callback only
+    // refreshes those caches on a *subsequent* file change, so
+    // first-launch users with `theme.active = "light"` (or any
+    // user-overlay) saw a frame-1 dark flash. (Codex post-Sprint
+    // review HIGH-1 fix.)
+    config::appearance::set_appearance(
+        config::appearance::AppearanceConfig::load_from(
+            &config::appearance::default_path(),
+        ),
+    );
+    theme::replace_lunaris_theme(theme::recompose_effective_theme());
+
+    // init state — `lunaris_theme()` now returns the freshly
+    // composed theme, so `state.common.lunaris_theme` and
+    // `shell.lunaris_theme` are both correct at construction.
     let mut state = state::State::new(
         &display,
         socket,
@@ -162,9 +182,8 @@ pub fn run(hooks: crate::hooks::Hooks) -> Result<(), Box<dyn Error>> {
     // init backend
     backend::init_backend_auto(&display, &mut event_loop, &mut state)?;
 
-    // Load appearance.toml overrides BEFORE watch_theme so the very
-    // first composed theme already reflects user overrides. Both
-    // watchers live-reload independently but compose the same pipeline.
+    // Watchers handle SUBSEQUENT changes (live theme switching).
+    // Initial composition is already done above.
     config::appearance::watch(event_loop.handle());
     theme::watch_theme(event_loop.handle());
 

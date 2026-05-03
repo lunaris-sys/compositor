@@ -744,7 +744,7 @@ impl CosmicStack {
         }
         let lt = crate::theme::lunaris_theme();
         let radii = if round {
-            lt.radius_s
+            lt.radius.window_corners
                 .map(|x| if x < 4.0 { x } else { x + 4.0 })
                 .map(|x| (x * scale as f32).round() as u8)
         } else {
@@ -771,7 +771,7 @@ impl CosmicStack {
                 radii,
                 if activated { alpha } else { alpha * 0.75 },
                 output_scale.x,
-                lt.is_dark,
+                lt.is_dark(),
             ))
             .into(),
         )
@@ -821,7 +821,7 @@ impl CosmicStack {
             let lt = crate::theme::lunaris_theme();
             let round = (appearance.clip_tiled_windows || !tiled) && !maximized;
             let radii = round.then(|| {
-                lt.radius_s
+                lt.radius.window_corners
                     .map(|x| if x < 4.0 { x } else { x + 4.0 })
                     .map(|x| x.round() as u8)
             });
@@ -983,7 +983,7 @@ impl CosmicStack {
 
         let round = (appearance.clip_tiled_windows || !is_tiled) && !maximized;
         let radii = crate::theme::lunaris_theme()
-            .radius_s
+            .radius.window_corners
             .map(|x| if x < 4.0 { x } else { x + 4.0 })
             .map(|val| val.round() as u8);
 

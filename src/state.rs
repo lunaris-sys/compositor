@@ -844,7 +844,7 @@ impl State {
                 gesture_state: None,
 
                 kiosk_child: None,
-                lunaris_theme: lunaris_theme::LunarisTheme::load(),
+                lunaris_theme: crate::theme::lunaris_theme(),
                 window_header_cache: std::collections::HashMap::new(),
 
                 compositor_state,

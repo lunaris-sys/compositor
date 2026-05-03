@@ -83,17 +83,12 @@ pub fn default_path() -> PathBuf {
 /// Parsed `[window]` section. Fields are optional so the parser degrades
 /// gracefully on missing or partial configs.
 ///
-/// Gaps are **not** in here any more — they live in `compositor.toml
-/// [layout]` which already has a working watcher. Gap UI in the Settings
-/// app writes there directly.
+/// Corner radius **no longer lives here** — it moved to
+/// `[overrides].radius_intensity` (semantic 0.0..=2.0 multiplier
+/// applied to the active theme's chip/button/input/card/modal
+/// scale). Gaps live in `compositor.toml [layout]`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WindowSection {
-    /// Corner radius in pixels. Integer — matches the Settings app
-    /// slider, which only emits whole numbers. Using `f32` here would
-    /// cause silent deserialization failures because TOML does not
-    /// implicitly cast integers to floats.
-    #[serde(default)]
-    pub corner_radius: Option<u32>,
     #[serde(default)]
     pub border_width: Option<u32>,
     #[serde(default)]
@@ -120,6 +115,12 @@ pub struct ThemeSection {
 pub struct OverridesSection {
     #[serde(default)]
     pub accent: Option<String>,
+    /// User-applied radius multiplier `0.0..=2.0`. Replaces the
+    /// old `[window].corner_radius` (integer pixels) with a
+    /// semantic, percentage-based knob — see
+    /// `docs/architecture/theme-system.md` §4.
+    #[serde(default)]
+    pub radius_intensity: Option<f32>,
 }
 
 /// Top-level appearance.toml shape. Only the fields the compositor
@@ -150,12 +151,12 @@ impl AppearanceConfig {
         match toml::from_str::<Self>(&contents) {
             Ok(cfg) => {
                 tracing::info!(
-                    "appearance: loaded {} ({} bytes) -> mode={:?} accent_override={:?} radius={:?} bw={:?} focused={:?} unfocused={:?}",
+                    "appearance: loaded {} ({} bytes) -> mode={:?} accent_override={:?} radius_intensity={:?} bw={:?} focused={:?} unfocused={:?}",
                     path.display(),
                     contents.len(),
                     cfg.theme.mode.as_deref().or(cfg.theme.active.as_deref()),
                     cfg.overrides.accent,
-                    cfg.window.corner_radius,
+                    cfg.overrides.radius_intensity,
                     cfg.window.border_width,
                     cfg.window.border.focused,
                     cfg.window.border.unfocused,
@@ -186,49 +187,30 @@ pub fn current_appearance() -> Option<AppearanceConfig> {
     APPEARANCE.read().unwrap().clone()
 }
 
-/// Apply overrides from `appearance.toml` to a fresh theme loaded from
-/// `theme.toml`. Called both from the theme watcher (when theme.toml
-/// changes) and from our own appearance watcher (when appearance.toml
-/// changes) so the effective theme is always the composed result.
+/// Apply overrides from `appearance.toml` to a resolved theme.
+/// Called both from the theme watcher (when theme.toml changes)
+/// and the appearance watcher (when appearance.toml changes).
 pub fn apply_to_theme(theme: &mut lunaris_theme::LunarisTheme, cfg: &AppearanceConfig) {
     let w = &cfg.window;
 
-    if let Some(radius) = w.corner_radius {
-        let r = radius as f32;
-        // Per-corner WINDOW outline radius (used for the overall
-        // window shape + shadow).
-        theme.radius_s = [r, r, r, r];
-
-        // Radius scale — MUST match the shell's
-        // `apply_window_overrides` in
-        // `desktop-shell/src-tauri/src/theme/loader.rs`:
-        //   md = corner_radius
-        //   if md == 0: sm=0, lg=0  (user explicitly wants sharp)
-        //   else:        sm = max(md-4, 2), lg = md+4
-        // Without this the compositor-rendered window header
-        // (Feature 4-C) would stay on the preset's 8-px rounding
-        // even when the user requested square corners, which is
-        // exactly the visual bug reported here: `corner_radius = 0`
-        // but the header top corners remained rounded.
-        let md = radius;
-        let (sm_u, lg_u) = if md == 0 {
-            (0u32, 0u32)
-        } else {
-            (md.saturating_sub(4).max(2), md.saturating_add(4))
-        };
-        theme.radius_md = md as f32;
-        theme.radius_sm = sm_u as f32;
-        theme.radius_lg = lg_u as f32;
-
+    // Radius intensity is the user knob; theme defines the absolute
+    // base values per token. `effective_*()` applies this at emit
+    // time on the consumer side (window-header rendering, CSS-var
+    // injection). We just store it on the theme.
+    if let Some(intensity) = cfg.overrides.radius_intensity {
+        theme.radius.intensity = intensity;
         tracing::info!(
-            "appearance: applied corner_radius {radius} -> \
-             radius_s={:?} radius_sm={} radius_md={} radius_lg={}",
-            theme.radius_s, theme.radius_sm, theme.radius_md, theme.radius_lg,
+            "appearance: applied radius_intensity {intensity:.2} \
+             -> effective: chip={} button={} card={} modal={} (full unscaled)",
+            theme.effective_chip(),
+            theme.effective_button(),
+            theme.effective_card(),
+            theme.effective_modal(),
         );
     }
 
     if let Some(bw) = w.border_width {
-        theme.active_hint = bw;
+        theme.wm.active_hint = bw;
         tracing::debug!("appearance: applied border_width {bw}");
     }
 
@@ -262,10 +244,10 @@ pub fn apply_to_theme(theme: &mut lunaris_theme::LunarisTheme, cfg: &AppearanceC
     };
     match focused_rgb {
         Some(rgb) => {
-            theme.window_hint = Some([rgb[0], rgb[1], rgb[2], 1.0]);
+            theme.wm.window_hint = Some([rgb[0], rgb[1], rgb[2], 1.0]);
             tracing::info!(
                 "appearance: window_hint <- {:?} (from {:?})",
-                theme.window_hint,
+                theme.wm.window_hint,
                 w.border.focused.as_deref().unwrap_or("<default:$accent>"),
             );
         }
@@ -456,18 +438,25 @@ fn handle_reload(path: &Path, state: &mut State) {
     let theme = crate::theme::recompose_effective_theme();
 
     tracing::info!(
-        "appearance: composed theme (full) — \
-         mode={:?} bg_shell={:?} bg_app={:?} bg_card={:?} \
-         fg_primary={:?} fg_secondary={:?} accent={:?} \
+        "appearance: composed theme — \
+         mode={:?} variant={:?} \
+         bg_shell={:?} bg_card={:?} fg_primary={:?} accent={:?} \
          border={:?} error={:?} \
-         radius_sm={} radius_md={} radius_lg={} radius_s={:?} \
-         active_hint={} window_hint={:?} font_sans={:?}",
+         radius_intensity={} effective_chip={} effective_button={} \
+         effective_card={} effective_modal={} \
+         window_corners={:?} active_hint={} window_hint={:?} \
+         font_sans={:?}",
         cfg.theme.mode.as_deref().or(cfg.theme.active.as_deref()),
-        theme.bg_shell, theme.bg_app, theme.bg_card,
-        theme.fg_primary, theme.fg_secondary, theme.accent,
-        theme.border, theme.error,
-        theme.radius_sm, theme.radius_md, theme.radius_lg, theme.radius_s,
-        theme.active_hint, theme.window_hint, theme.font_sans,
+        theme.meta.variant,
+        theme.color.bg_shell, theme.color.bg_card,
+        theme.color.fg_primary, theme.color.accent,
+        theme.color.border_default, theme.color.error,
+        theme.radius.intensity,
+        theme.effective_chip(), theme.effective_button(),
+        theme.effective_card(), theme.effective_modal(),
+        theme.radius.window_corners,
+        theme.wm.active_hint, theme.wm.window_hint,
+        theme.typography.font_sans,
     );
 
     crate::theme::replace_lunaris_theme(theme.clone());
@@ -542,19 +531,18 @@ mod tests {
     #[test]
     fn test_parse_empty_string() {
         let cfg: AppearanceConfig = toml::from_str("").unwrap();
-        assert!(cfg.window.corner_radius.is_none());
         assert!(cfg.window.border_width.is_none());
         assert!(cfg.window.border.focused.is_none());
+        assert!(cfg.overrides.radius_intensity.is_none());
     }
 
     #[test]
-    fn test_parse_partial_window() {
+    fn test_parse_radius_intensity() {
         let cfg: AppearanceConfig = toml::from_str(
-            "[window]\ncorner_radius = 12\n",
+            "[overrides]\nradius_intensity = 1.5\n",
         )
         .unwrap();
-        assert_eq!(cfg.window.corner_radius, Some(12));
-        assert!(cfg.window.border_width.is_none());
+        assert_eq!(cfg.overrides.radius_intensity, Some(1.5));
     }
 
     #[test]
@@ -579,77 +567,66 @@ mod tests {
 
     // ── apply_to_theme ───────────────────────────────────────────────
 
-    #[test]
-    fn test_apply_radius() {
-        let mut theme = lunaris_theme::LunarisTheme::panda();
-        let cfg: AppearanceConfig = toml::from_str("[window]\ncorner_radius = 0\n").unwrap();
-        apply_to_theme(&mut theme, &cfg);
-        assert_eq!(theme.radius_s, [0.0, 0.0, 0.0, 0.0]);
+    /// Builds a sane test theme from the bundled dark.toml bytes.
+    /// We use a minimal-meta document; the resolver fills sane
+    /// defaults for everything else.
+    fn test_theme() -> lunaris_theme::LunarisTheme {
+        let bytes = r##"
+[meta]
+id = "dark"
+name = "Lunaris Dark"
+variant = "dark"
+"##;
+        lunaris_theme::LunarisTheme::from_bundled(bytes).unwrap()
     }
 
     #[test]
-    fn corner_radius_zero_zeros_all_radius_tiers() {
-        // Regression: the compositor-rendered Lunaris header
-        // (Feature 4-C) reads `theme.radius_md` for button and
-        // header-top rounding. If corner_radius=0 only zeroed
-        // radius_s (window outline) while leaving radius_md at
-        // the 8-px preset, the header kept rounded corners —
-        // which is the exact visual bug that led to this fix.
-        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
-        assert_eq!(theme.radius_md, 8.0, "sanity: preset starts at 8");
-        let cfg: AppearanceConfig =
-            toml::from_str("[window]\ncorner_radius = 0\n").unwrap();
-        apply_to_theme(&mut theme, &cfg);
-        assert_eq!(theme.radius_s, [0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(theme.radius_sm, 0.0);
-        assert_eq!(theme.radius_md, 0.0);
-        assert_eq!(theme.radius_lg, 0.0);
+    fn intensity_default_value_is_1() {
+        let theme = test_theme();
+        assert_eq!(theme.radius.intensity, 1.0);
     }
 
     #[test]
-    fn corner_radius_nonzero_derives_sm_lg_like_shell() {
-        // Mirror the shell's derivation:
-        //   md = corner_radius
-        //   sm = max(md - 4, 2)
-        //   lg = md + 4
-        // The shell implementation lives in
-        // `desktop-shell/src-tauri/src/theme/loader.rs::apply_window_overrides`.
-        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
+    fn intensity_override_applies() {
+        let mut theme = test_theme();
         let cfg: AppearanceConfig =
-            toml::from_str("[window]\ncorner_radius = 12\n").unwrap();
+            toml::from_str("[overrides]\nradius_intensity = 1.5\n").unwrap();
         apply_to_theme(&mut theme, &cfg);
-        assert_eq!(theme.radius_md, 12.0);
-        assert_eq!(theme.radius_sm, 8.0);
-        assert_eq!(theme.radius_lg, 16.0);
+        assert_eq!(theme.radius.intensity, 1.5);
     }
 
     #[test]
-    fn corner_radius_small_values_clamp_sm_to_two() {
-        // md = 4 → sm should clamp to 2 (not 0), lg = 8.
-        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
+    fn intensity_zero_yields_sharp_effective_radii() {
+        let mut theme = test_theme();
         let cfg: AppearanceConfig =
-            toml::from_str("[window]\ncorner_radius = 4\n").unwrap();
+            toml::from_str("[overrides]\nradius_intensity = 0.0\n").unwrap();
         apply_to_theme(&mut theme, &cfg);
-        assert_eq!(theme.radius_md, 4.0);
-        assert_eq!(theme.radius_sm, 2.0);
-        assert_eq!(theme.radius_lg, 8.0);
+        assert_eq!(theme.effective_chip(),   0.0);
+        assert_eq!(theme.effective_button(), 0.0);
+        assert_eq!(theme.effective_card(),   0.0);
+        assert_eq!(theme.effective_modal(),  0.0);
+        // Full + window_corners NEVER scaled.
+        assert_eq!(theme.effective_full(), 9999.0);
+    }
 
-        // md = 3 → max(3-4=0, 2) = 2, lg = 7.
-        let mut theme = lunaris_theme::LunarisTheme::lunaris_dark();
+    #[test]
+    fn intensity_max_doubles_effective_radii() {
+        let mut theme = test_theme();
         let cfg: AppearanceConfig =
-            toml::from_str("[window]\ncorner_radius = 3\n").unwrap();
+            toml::from_str("[overrides]\nradius_intensity = 2.0\n").unwrap();
         apply_to_theme(&mut theme, &cfg);
-        assert_eq!(theme.radius_md, 3.0);
-        assert_eq!(theme.radius_sm, 2.0);
-        assert_eq!(theme.radius_lg, 7.0);
+        // chip(4) * 2.0 = 8
+        assert_eq!(theme.effective_chip(), 8.0);
+        // button(6) * 2.0 = 12
+        assert_eq!(theme.effective_button(), 12.0);
     }
 
     #[test]
     fn test_apply_border_width() {
-        let mut theme = lunaris_theme::LunarisTheme::panda();
+        let mut theme = test_theme();
         let cfg: AppearanceConfig = toml::from_str("[window]\nborder_width = 3\n").unwrap();
         apply_to_theme(&mut theme, &cfg);
-        assert_eq!(theme.active_hint, 3);
+        assert_eq!(theme.wm.active_hint, 3);
     }
 
     // ── Sentinel resolution ──────────────────────────────────────────
@@ -660,7 +637,7 @@ mod tests {
             "[theme]\nmode = \"dark\"\n\n[overrides]\naccent = \"$foreground\"\n",
         )
         .unwrap();
-        let theme = lunaris_theme::LunarisTheme::panda();
+        let theme = test_theme();
         let rgb = effective_accent(&cfg, &theme);
         // MONO_DARK = #fafafa → ~0.98
         assert!(rgb[0] > 0.95, "dark monochrome should be near-white: {}", rgb[0]);
@@ -672,7 +649,7 @@ mod tests {
             "[theme]\nmode = \"light\"\n\n[overrides]\naccent = \"$foreground\"\n",
         )
         .unwrap();
-        let theme = lunaris_theme::LunarisTheme::panda();
+        let theme = test_theme();
         let rgb = effective_accent(&cfg, &theme);
         // MONO_LIGHT = #171717 → ~0.09
         assert!(rgb[0] < 0.15, "light monochrome should be near-black: {}", rgb[0]);
@@ -684,7 +661,7 @@ mod tests {
             "[overrides]\naccent = \"#ff0000\"\n",
         )
         .unwrap();
-        let theme = lunaris_theme::LunarisTheme::panda();
+        let theme = test_theme();
         let rgb = effective_accent(&cfg, &theme);
         assert!((rgb[0] - 1.0).abs() < 0.01, "red channel");
         assert!(rgb[1] < 0.01, "green channel");
@@ -693,9 +670,8 @@ mod tests {
     #[test]
     fn test_effective_accent_no_override_falls_back_to_theme() {
         let cfg: AppearanceConfig = toml::from_str("").unwrap();
-        let theme = lunaris_theme::LunarisTheme::panda();
+        let theme = test_theme();
         let rgb = effective_accent(&cfg, &theme);
-        // Falls back to theme.accent_rgb() — Panda accent.
         let expected = theme.accent_rgb();
         assert_eq!(rgb, expected);
     }
